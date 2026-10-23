@@ -210,6 +210,25 @@ impl WgpuRenderer {
         *next_index = base + corners.len() as u16;
     }
 
+    /// Draw the 3D geometry within the given render pass.
+    pub fn draw_3d(&self, render_pass: &mut wgpu::RenderPass<'_>) {
+        let pipeline = self
+            .render_pipeline
+            .as_ref()
+            .expect("render pipeline not initialized");
+        render_pass.set_pipeline(pipeline);
+        if let Some(vertex_buffer) = &self.vertex_buffer {
+            render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+        }
+        if let Some(index_buffer) = &self.index_buffer {
+            render_pass.set_index_buffer(
+                index_buffer.slice(..),
+                wgpu::IndexFormat::Uint16,
+            );
+            render_pass.draw_indexed(0..self.num_indices, 0, 0..1);
+        }
+    }
+
     /// Upload geometry to GPU buffers. Call after `build_geometry`.
     fn upload_buffers(&mut self) {
         let device = self.device.as_ref().unwrap();
