@@ -1,0 +1,14 @@
+[package]
+name = "qcsxcad-core"
+version = "0.1.0"
+edition = "2021"
+license = "LGPL-3.0-or-later"
+description = "Rust foundations for QCSXCAD GUI"
+build = "build.rs"
+
+[dependencies]
+csxcad-core = { package = "csxcad-core", path = "../../CSXCAD/rust" }
+fparser = { package = "fparser-rs", path = "../../fparser/rust" }
+thiserror = "2.0"
+
+[build-dependencies]
