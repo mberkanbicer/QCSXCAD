@@ -1,0 +1,17 @@
+[package]
+name = "qcsxcad-egui"
+version = "0.1.0"
+edition = "2021"
+license = "LGPL-3.0-or-later"
+description = "egui + wgpu GUI implementation for QCSXCAD"
+
+[dependencies]
+qcsxcad-core = { package = "qcsxcad-core", path = "../rust" }
+csxcad-core = { package = "csxcad-core", path = "../../CSXCAD/rust" }
+egui = "0.37"
+egui-winit = "0.37"
+egui-wgpu = "0.37"
+wgpu = "30"
+winit = "0.30"
+bytemuck = { version = "1.14", features = ["derive"] }
+thiserror = "2.0"

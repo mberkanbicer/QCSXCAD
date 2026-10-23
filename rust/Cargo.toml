@@ -11,4 +11,12 @@ csxcad-core = { package = "csxcad-core", path = "../../CSXCAD/rust" }
 fparser = { package = "fparser-rs", path = "../../fparser/rust" }
 thiserror = "2.0"
 
+# GUI framework: egui (immediate-mode UI) + wgpu (cross-platform 3D rendering)
+egui = "0.37"
+egui-winit = "0.37"
+egui-wgpu = "0.37"
+wgpu = "30"
+winit = "0.30"
+bytemuck = { version = "1.14", features = ["derive"] }
+
 [build-dependencies]
