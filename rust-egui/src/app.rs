@@ -319,6 +319,27 @@ impl EguiApp {
         self.primitive_editor.refresh(self.structure.as_ref().unwrap(), &self.gui_state);
     }
 
+    /// Get the current structure (if any).
+    pub fn structure(&self) -> Option<&Structure> {
+        self.structure.as_ref()
+    }
+
+    /// Take the current structure out of the app (leaving None in its place).
+    pub fn take_structure(&mut self) -> Option<Structure> {
+        self.structure.take()
+    }
+
+    /// Clear the current structure and refresh all widgets.
+    pub fn clear_structure(&mut self) {
+        if let Some(structure) = self.structure.as_ref() {
+            self.tree_widget.refresh(structure, &self.gui_state);
+            self.grid_editor.refresh(structure);
+            self.property_editor.refresh(structure, &self.gui_state);
+            self.primitive_editor.refresh(structure, &self.gui_state);
+        }
+        self.structure = None;
+    }
+
     /// Request a redraw of the winit window.
     pub fn request_redraw(&self) {
         if let Some(window) = &self.window {
