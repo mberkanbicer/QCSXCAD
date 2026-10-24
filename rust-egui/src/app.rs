@@ -130,9 +130,9 @@ impl EguiApp {
         );
         self.egui_wgpu_renderer = Some(egui_wgpu_renderer);
 
+        self.renderer.init(adapter, device, queue, &config);
         self.renderer
             .configure_surface(self.surface.as_ref().unwrap(), egui_device, size.width, size.height);
-        self.renderer.init(adapter, device, queue, &config);
     }
 
     /// Resize the wgpu surface and egui state.
