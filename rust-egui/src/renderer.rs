@@ -217,6 +217,8 @@ pub struct WgpuRenderer {
     /// Cached vertex data for the current structure.
     triangle_vertices: Vec<Vertex>,
     line_vertices: Vec<Vertex>,
+    /// Include discrete-material models (native `--RenderDiscMaterial`).
+    render_discrete_models: bool,
 }
 
 impl Default for WgpuRenderer {
@@ -249,6 +251,7 @@ impl WgpuRenderer {
             auto_fit: true,
             triangle_vertices: Vec::new(),
             line_vertices: Vec::new(),
+            render_discrete_models: false,
         }
     }
 
@@ -442,7 +445,10 @@ impl WgpuRenderer {
         self.triangle_vertices.clear();
         self.line_vertices.clear();
 
-        let tessellator = Tessellator::new();
+        let tessellator = Tessellator {
+            resolution: 32,
+            render_discrete: self.render_discrete_models,
+        };
         for primitive in tessellator.tessellate(structure) {
             for triangle in &primitive.mesh.triangles {
                 for vertex in triangle {
@@ -754,7 +760,7 @@ impl WgpuRenderer {
 }
 
 impl StructureRenderer for WgpuRenderer {
-    fn render(&mut self, structure: &Structure, _state: &GuiState) -> Result<(), GuiError> {
+    fn render(&mut self, structure: &Structure, state: &GuiState) -> Result<(), GuiError> {
         self.device
             .as_ref()
             .ok_or_else(|| GuiError::Model("renderer not initialized: call init first".into()))?;
@@ -762,6 +768,7 @@ impl StructureRenderer for WgpuRenderer {
             .as_ref()
             .ok_or_else(|| GuiError::Model("render pipeline not initialized".into()))?;
 
+        self.render_discrete_models = state.render_disc_models;
         self.build_geometry(structure);
         self.upload_buffers();
         Ok(())

@@ -32,6 +32,8 @@ pub struct EguiApp {
     document: Option<Document>,
     /// Revision of the structure the current GPU geometry was built from.
     last_geometry_revision: u64,
+    /// Discrete-material rendering state the geometry was built with.
+    last_render_disc_models: bool,
     gui_state: GuiState,
 }
 
@@ -55,6 +57,7 @@ impl EguiApp {
             primitive_editor: EguiPrimitiveEditor::default(),
             document: None,
             last_geometry_revision: 0,
+            last_render_disc_models: false,
             gui_state: GuiState::new(),
         }
     }
@@ -230,10 +233,14 @@ impl EguiApp {
         // Rebuild the 3D geometry only when the document changed.
         if let Some(document) = self.document.as_ref() {
             let revision = document.revision().max(1);
-            if revision != self.last_geometry_revision {
+            let render_disc_models = self.gui_state.render_disc_models;
+            if revision != self.last_geometry_revision
+                || render_disc_models != self.last_render_disc_models
+            {
                 let structure = document.structure();
                 self.renderer.render(structure, &self.gui_state)?;
                 self.last_geometry_revision = revision;
+                self.last_render_disc_models = render_disc_models;
             }
         }
 
@@ -420,6 +427,16 @@ impl EguiApp {
         self.tree_widget.set_selection(Selection::new());
         // force a geometry rebuild on the next frame
         self.last_geometry_revision = 0;
+    }
+
+    /// Get the GUI state (view options, selection).
+    pub fn gui_state(&self) -> &GuiState {
+        &self.gui_state
+    }
+
+    /// Get the GUI state mutably.
+    pub fn gui_state_mut(&mut self) -> &mut GuiState {
+        &mut self.gui_state
     }
 
     /// Get the current document (if any).

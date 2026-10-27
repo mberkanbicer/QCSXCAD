@@ -6,6 +6,11 @@ license = "LGPL-3.0-or-later"
 description = "Rust foundations for QCSXCAD GUI"
 build = "build.rs"
 
+[features]
+default = []
+# discrete-material rendering needs the HDF5 reader
+hdf5 = ["csxcad-core/hdf5"]
+
 [dependencies]
 csxcad-core = { package = "csxcad-core", path = "../../CSXCAD/rust" }
 fparser = { package = "fparser-rs", path = "../../fparser/rust" }

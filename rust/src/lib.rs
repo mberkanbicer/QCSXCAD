@@ -13,6 +13,7 @@
 //!
 //! The concrete toolkit implementation lives in the `qcsxcad-egui` crate.
 
+pub mod discrete;
 pub mod document;
 pub mod export;
 pub mod model;
@@ -22,6 +23,7 @@ pub mod tessellate;
 pub mod tree;
 pub mod widgets;
 
+pub use discrete::surface_mesh;
 pub use document::{parse_frequency_list, Document, PropertyEdit, CREATABLE_PROPERTY_TYPES};
 pub use export::{export_povray, export_properties, export_x3d, PropertyFormat};
 pub use model::{GuiError, GuiState, Selection};

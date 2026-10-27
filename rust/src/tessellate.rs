@@ -124,6 +124,8 @@ pub struct PrimitiveMesh {
 pub struct Tessellator {
     /// Segments per full revolution (native `iResolution`, default 32).
     pub resolution: usize,
+    /// Draw discrete-material models (native `--RenderDiscMaterial`).
+    pub render_discrete: bool,
 }
 
 impl Default for Tessellator {
@@ -134,7 +136,10 @@ impl Default for Tessellator {
 
 impl Tessellator {
     pub fn new() -> Self {
-        Self { resolution: 32 }
+        Self {
+            resolution: 32,
+            render_discrete: false,
+        }
     }
 
     /// Tessellate every visible property of a structure.
@@ -184,6 +189,12 @@ impl Tessellator {
                     edge_color,
                     mesh,
                 });
+            }
+        }
+        if self.render_discrete {
+            #[cfg(feature = "hdf5")]
+            if let Some(discrete) = crate::discrete::property_surface_mesh(property) {
+                meshes.push(discrete);
             }
         }
         meshes
@@ -753,7 +764,10 @@ mod tests {
     use csxcad_core::model::Structure;
 
     fn tessellator() -> Tessellator {
-        Tessellator { resolution: 16 }
+        Tessellator {
+            resolution: 16,
+            render_discrete: false,
+        }
     }
 
     fn mesh_of(primitive: Primitive) -> Mesh {
@@ -919,6 +933,47 @@ mod tests {
         let mesh = mesh_of(primitive);
         assert_eq!(mesh.triangles.len(), 2);
         assert_eq!(mesh.lines.len(), 6);
+    }
+
+    #[cfg(feature = "hdf5")]
+    #[test]
+    fn the_tessellator_adds_discrete_material_surfaces_when_enabled() {
+        use csxcad_core::model::PropertyType;
+
+        let directory = std::env::temp_dir().join(format!(
+            "qcsxcad-discrete-tess-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).expect("temp dir");
+        let path = directory.join("discrete_material_v2.h5");
+        std::fs::write(
+            &path,
+            include_bytes!("../../../CSXCAD/rust/tests/fixtures/discrete_material_v2.h5"),
+        )
+        .expect("fixture");
+
+        let mut property = Property::new("voxels", PropertyType::DiscreteMaterial);
+        let properties = property.discrete_material_mut().expect("discrete material");
+        properties.set_file_type(0);
+        properties.set_file_name(path.to_string_lossy().into_owned());
+        let parameters = ParameterSet::new();
+
+        let enabled = Tessellator {
+            resolution: 16,
+            render_discrete: true,
+        }
+        .tessellate_property(&property, &parameters);
+        assert_eq!(enabled.len(), 1);
+        assert_eq!(enabled[0].fill_color, [1.0, 1.0, 1.0, 1.0]);
+        assert!(!enabled[0].mesh.triangles.is_empty());
+
+        let disabled = Tessellator {
+            resolution: 16,
+            render_discrete: false,
+        }
+        .tessellate_property(&property, &parameters);
+        assert!(disabled.is_empty());
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]

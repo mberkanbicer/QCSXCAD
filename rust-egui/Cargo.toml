@@ -6,7 +6,7 @@ license = "LGPL-3.0-or-later"
 description = "egui + wgpu GUI implementation for QCSXCAD"
 
 [dependencies]
-qcsxcad-core = { package = "qcsxcad-core", path = "../rust" }
+qcsxcad-core = { package = "qcsxcad-core", path = "../rust", features = ["hdf5"] }
 csxcad-core = { package = "csxcad-core", path = "../../CSXCAD/rust" }
 egui = { version = "0.37", features = ["default_fonts"] }
 egui-winit = "0.37"
