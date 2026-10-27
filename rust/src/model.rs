@@ -5,6 +5,7 @@
 //! are selected, which properties are visible, and the current view mode.
 
 use csxcad_core::model::{PrimitiveId, PropertyId};
+use csxcad_core::parameter::ParameterError;
 use std::collections::HashSet;
 
 /// The active view mode: 2D orthographic or 3D.
@@ -75,6 +76,18 @@ pub enum GuiError {
     InvalidPropertyType(String),
     #[error("model error: {0}")]
     Model(String),
+    #[error("invalid value: {0}")]
+    InvalidValue(String),
+    #[error("parameter error: {0}")]
+    Parameter(String),
     #[error("xml error: {0}")]
     Xml(String),
+    #[error("io error: {0}")]
+    Io(String),
+}
+
+impl From<ParameterError> for GuiError {
+    fn from(error: ParameterError) -> Self {
+        GuiError::Parameter(error.to_string())
+    }
 }

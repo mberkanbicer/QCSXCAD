@@ -9,7 +9,9 @@
 //! primitive transform applied.
 
 use csxcad_core::grid::CoordinateSystem;
-use csxcad_core::model::{Primitive, PrimitiveShape, PrimitiveType, PropertyColor, Structure};
+use csxcad_core::model::{
+    Primitive, PrimitiveShape, PrimitiveType, Property, PropertyColor, Structure,
+};
 use csxcad_core::parameter::ParameterSet;
 use csxcad_core::transform::Transform;
 
@@ -78,7 +80,7 @@ impl Mesh {
 
     /// Apply a CSXCAD transform to every vertex.
     pub fn apply_transform(&mut self, transform: &Transform) {
-        let mut map = |vertex: &mut Vertex| *vertex = transform.transform(*vertex);
+        let map = |vertex: &mut Vertex| *vertex = transform.transform(*vertex);
         for triangle in &mut self.triangles {
             for vertex in triangle {
                 map(vertex);
@@ -146,30 +148,42 @@ impl Tessellator {
             if !property.is_visible() {
                 continue;
             }
-            let fill_color = property
-                .fill_color()
-                .map(color_to_rgba)
-                .unwrap_or(DEFAULT_FILL);
-            let edge_color = property
-                .edge_color()
-                .map(color_to_rgba)
-                .unwrap_or(DEFAULT_EDGE);
-            for primitive in property.primitives() {
-                let mut mesh = Mesh::default();
-                self.tessellate_primitive(primitive, parameters, &mut mesh);
-                if let Some(transform) = primitive.transform() {
-                    if transform.has_transform() {
-                        mesh.apply_transform(transform);
-                    }
+            meshes.extend(self.tessellate_property(property, parameters));
+        }
+        meshes
+    }
+
+    /// Tessellate one property (the exporters work per property, like the
+    /// native `ExportProperty2*` helpers).
+    pub fn tessellate_property(
+        &self,
+        property: &Property,
+        parameters: &ParameterSet,
+    ) -> Vec<PrimitiveMesh> {
+        let fill_color = property
+            .fill_color()
+            .map(color_to_rgba)
+            .unwrap_or(DEFAULT_FILL);
+        let edge_color = property
+            .edge_color()
+            .map(color_to_rgba)
+            .unwrap_or(DEFAULT_EDGE);
+        let mut meshes = Vec::new();
+        for primitive in property.primitives() {
+            let mut mesh = Mesh::default();
+            self.tessellate_primitive(primitive, parameters, &mut mesh);
+            if let Some(transform) = primitive.transform() {
+                if transform.has_transform() {
+                    mesh.apply_transform(transform);
                 }
-                if !mesh.is_empty() {
-                    meshes.push(PrimitiveMesh {
-                        kind: primitive.primitive_type(),
-                        fill_color,
-                        edge_color,
-                        mesh,
-                    });
-                }
+            }
+            if !mesh.is_empty() {
+                meshes.push(PrimitiveMesh {
+                    kind: primitive.primitive_type(),
+                    fill_color,
+                    edge_color,
+                    mesh,
+                });
             }
         }
         meshes

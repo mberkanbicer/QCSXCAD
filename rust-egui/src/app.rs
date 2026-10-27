@@ -1,11 +1,10 @@
 //! Main application struct tying together egui widgets and wgpu renderer.
 
 use csxcad_core::model::Structure;
+use qcsxcad_core::document::Document;
 use qcsxcad_core::model::{GuiError, GuiState, Selection};
 use qcsxcad_core::rendering::StructureRenderer;
-use qcsxcad_core::widgets::{
-    GridEditor, PrimitiveEditor, PropertyEditor, TreeWidget,
-};
+use qcsxcad_core::widgets::TreeWidget;
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::Window;
@@ -30,7 +29,9 @@ pub struct EguiApp {
     grid_editor: EguiGridEditor,
     property_editor: EguiPropertyEditor,
     primitive_editor: EguiPrimitiveEditor,
-    structure: Option<Structure>,
+    document: Option<Document>,
+    /// Revision of the structure the current GPU geometry was built from.
+    last_geometry_revision: u64,
     gui_state: GuiState,
 }
 
@@ -52,7 +53,8 @@ impl EguiApp {
             grid_editor: EguiGridEditor::default(),
             property_editor: EguiPropertyEditor::default(),
             primitive_editor: EguiPrimitiveEditor::default(),
-            structure: None,
+            document: None,
+            last_geometry_revision: 0,
             gui_state: GuiState::new(),
         }
     }
@@ -167,6 +169,15 @@ impl EguiApp {
 
     /// Render one frame: egui UI + wgpu 3D viewport.
     pub fn render(&mut self) -> Result<(), GuiError> {
+        self.render_with(|_, _, _| {})
+    }
+
+    /// Render one frame, letting the embedding application draw extra UI (the
+    /// AppCSXCAD menu) with access to the document and the GUI state.
+    pub fn render_with(
+        &mut self,
+        mut extra_ui: impl FnMut(&mut egui::Ui, &mut Document, &mut GuiState),
+    ) -> Result<(), GuiError> {
         // Begin egui frame: gather input and run UI.
         // Use temporary borrows so no `self` field is borrowed across `run_ui`.
         let raw_input = self
@@ -179,7 +190,7 @@ impl EguiApp {
         // while the closure needs &mut self (for build_ui -> widget show methods).
         let egui_ctx = std::mem::replace(&mut self.egui_ctx, egui::Context::default());
         let full_output = egui_ctx.run_ui(raw_input, |ui| {
-            self.build_ui(ui);
+            self.build_ui(ui, &mut extra_ui);
         });
         self.egui_ctx = egui_ctx;
 
@@ -216,9 +227,14 @@ impl EguiApp {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        // Build 3D geometry if we have a structure.
-        if let Some(structure) = self.structure.as_ref() {
-            self.renderer.render(structure, &self.gui_state)?;
+        // Rebuild the 3D geometry only when the document changed.
+        if let Some(document) = self.document.as_ref() {
+            let revision = document.revision().max(1);
+            if revision != self.last_geometry_revision {
+                let structure = document.structure();
+                self.renderer.render(structure, &self.gui_state)?;
+                self.last_geometry_revision = revision;
+            }
         }
 
         // Begin render pass.
@@ -295,74 +311,158 @@ impl EguiApp {
     }
 
     /// Build the egui UI for one frame.
-    fn build_ui(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::top("menu_bar").show(ui, |ui| {
-            egui::menu::MenuBar::default().ui(ui, |ui| {
-                if ui.menu_button("File", |_ui| {}).response.clicked() {
-                    // File menu handled by embedding application
+    fn build_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        extra_ui: &mut impl FnMut(&mut egui::Ui, &mut Document, &mut GuiState),
+    ) {
+        let EguiApp {
+            document,
+            gui_state,
+            tree_widget,
+            property_editor,
+            primitive_editor,
+            grid_editor,
+            ..
+        } = self;
+
+        // Document-level undo/redo. The shortcut is ignored while a text
+        // field has the keyboard, so egui's own text undo still applies there.
+        let (undo_pressed, redo_pressed) = ui.input(|input| {
+            let command = input.modifiers.command;
+            let key_z = input.key_pressed(egui::Key::Z);
+            let key_y = input.key_pressed(egui::Key::Y);
+            (
+                command && !input.modifiers.shift && key_z,
+                command && ((input.modifiers.shift && key_z) || key_y),
+            )
+        });
+        if !ui.ctx().egui_wants_keyboard_input() {
+            if let Some(document) = document.as_mut() {
+                if undo_pressed {
+                    document.undo();
+                } else if redo_pressed {
+                    document.redo();
                 }
-                if ui.menu_button("Info", |_ui| {}).response.clicked() {
-                    // Info menu handled by embedding application
+            }
+        }
+
+        // The embedding application (AppCSXCAD) draws its menu above the
+        // library panels.
+        if let Some(document) = document.as_mut() {
+            extra_ui(ui, document, gui_state);
+        }
+
+        egui::Panel::top("status_bar").show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.strong("QCSXCAD");
+                match document.as_ref() {
+                    Some(document) => {
+                        ui.label(format!(
+                            "{} properties / {} primitives",
+                            document.structure().property_count(),
+                            document
+                                .structure()
+                                .all_primitives(false, csxcad_core::model::PropertyType::Any)
+                                .len()
+                        ));
+                        if document.is_modified() {
+                            ui.label("· modified");
+                        }
+                    }
+                    None => {
+                        ui.label("· no structure loaded");
+                    }
                 }
             });
         });
 
         egui::Panel::left("structure_tree")
-            .default_size(250.0)
+            .default_size(280.0)
             .show(ui, |ui| {
-                if let Some(structure) = self.structure.as_ref() {
-                    self.tree_widget.show(ui, structure, &self.gui_state);
+                if let Some(document) = document.as_mut() {
+                    tree_widget.show(ui, document, gui_state);
                 }
             });
 
-        egui::CentralPanel::default().show(ui, |ui| {
-            ui.heading("3D Viewport");
-            if self.structure.is_none() {
-                ui.label("No structure loaded.");
-            } else {
-                ui.label("3D viewport rendering via wgpu.");
-            }
-        });
+        // The 3D structure is drawn by the wgpu pass underneath egui, so the
+        // central panel must not paint an opaque background over it.
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE)
+            .show(ui, |_ui| {});
 
         egui::Panel::right("editors")
-            .default_size(250.0)
+            .default_size(340.0)
             .show(ui, |ui| {
-                if let Some(structure) = self.structure.as_ref() {
-                    let _ = self.grid_editor.show(ui, structure);
-                    let _ = self.property_editor.show(ui, structure, &self.gui_state);
-                    let _ = self.primitive_editor.show(ui, structure, &self.gui_state);
+                if let Some(document) = document.as_mut() {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        let _ = property_editor.show(ui, document, gui_state);
+                        ui.separator();
+                        let _ = primitive_editor.show(ui, document, gui_state);
+                        ui.separator();
+                        let _ = grid_editor.show(ui, document);
+                    });
                 }
             });
     }
 
     /// Load a structure into the application.
     pub fn load_structure(&mut self, structure: Structure) {
-        self.structure = Some(structure);
-        self.tree_widget.refresh(self.structure.as_ref().unwrap(), &self.gui_state);
-        self.grid_editor.refresh(self.structure.as_ref().unwrap());
-        self.property_editor.refresh(self.structure.as_ref().unwrap(), &self.gui_state);
-        self.primitive_editor.refresh(self.structure.as_ref().unwrap(), &self.gui_state);
+        self.load_document(Document::from_structure(structure));
+    }
+
+    /// Load a document (structure + editing state) into the application.
+    pub fn load_document(&mut self, document: Document) {
+        self.document = Some(document);
+        self.gui_state.selection.clear();
+        self.gui_state.modified = false;
+        self.tree_widget.set_selection(Selection::new());
+        // force a geometry rebuild on the next frame
+        self.last_geometry_revision = 0;
+    }
+
+    /// Get the current document (if any).
+    pub fn document(&self) -> Option<&Document> {
+        self.document.as_ref()
+    }
+
+    /// Get the current document mutably (if any).
+    pub fn document_mut(&mut self) -> Option<&mut Document> {
+        self.document.as_mut()
     }
 
     /// Get the current structure (if any).
     pub fn structure(&self) -> Option<&Structure> {
-        self.structure.as_ref()
+        self.document.as_ref().map(Document::structure)
     }
 
     /// Take the current structure out of the app (leaving None in its place).
     pub fn take_structure(&mut self) -> Option<Structure> {
-        self.structure.take()
+        self.document.take().map(Document::into_structure)
     }
 
     /// Clear the current structure and refresh all widgets.
     pub fn clear_structure(&mut self) {
-        if let Some(structure) = self.structure.as_ref() {
-            self.tree_widget.refresh(structure, &self.gui_state);
-            self.grid_editor.refresh(structure);
-            self.property_editor.refresh(structure, &self.gui_state);
-            self.primitive_editor.refresh(structure, &self.gui_state);
+        self.document = None;
+        self.last_geometry_revision = 0;
+        self.gui_state.selection.clear();
+        self.gui_state.modified = false;
+        self.tree_widget.set_selection(Selection::new());
+    }
+
+    /// Set the window title.
+    pub fn set_title(&self, title: &str) {
+        if let Some(window) = &self.window {
+            window.set_title(title);
         }
-        self.structure = None;
+    }
+
+    /// Current inner size of the window.
+    pub fn window_size(&self) -> Option<(u32, u32)> {
+        self.window.as_ref().map(|window| {
+            let size = window.inner_size();
+            (size.width, size.height)
+        })
     }
 
     /// Request a redraw of the winit window.

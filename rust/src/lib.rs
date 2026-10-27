@@ -1,18 +1,30 @@
-//! Rust foundations for the QCSXCAD GUI.
+//! Rust foundations for the QCSXCAD GUI and AppCSXCAD.
 //!
-//! This crate provides the data model, XML I/O, and widget/rendering
-//! abstractions needed to port QCSXCAD and AppCSXCAD from C++/Qt/VTK to Rust.
+//! This crate holds everything the desktop applications need without a
+//! toolkit dependency:
 //!
-//! The GUI framework and rendering backend are intentionally left abstract
-//! here so the integration can choose a Rust-native solution (egui, iced,
-//! gtk, qt-rs, etc.) without coupling the data model to a specific toolkit.
+//! - `document`: the editable CSXCAD model (property/primitive/grid/parameter
+//!   edits with undo/redo), shared by the widgets and the tests;
+//! - `tree`: the native structure-tree labels and rows;
+//! - `tessellate`: the ported `VTKPrimitives` geometry mapping;
+//! - `export`: the VTK/STL/PLY/POV-Ray/X3D exporters;
+//! - `project`: native CSXCAD/openEMS project reading and writing;
+//! - `model`, `widgets`, `rendering`: GUI state and the tree/renderer seams.
+//!
+//! The concrete toolkit implementation lives in the `qcsxcad-egui` crate.
 
+pub mod document;
+pub mod export;
 pub mod model;
-pub mod tessellate;
-pub mod xml;
-pub mod widgets;
+pub mod project;
 pub mod rendering;
+pub mod tessellate;
+pub mod tree;
+pub mod widgets;
 
+pub use document::{parse_frequency_list, Document, PropertyEdit, CREATABLE_PROPERTY_TYPES};
+pub use export::{export_povray, export_properties, export_x3d, PropertyFormat};
 pub use model::{GuiError, GuiState, Selection};
+pub use project::ProjectFile;
 pub use tessellate::{Mesh, PrimitiveMesh, Tessellator};
-pub use xml::{GuiXmlError, GuiXmlWarning, read_gui_xml, write_gui_xml};
+pub use tree::{primitive_label, property_label, tree_rows, TreeItem, TreeRow};
