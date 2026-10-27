@@ -11,8 +11,8 @@ use std::collections::HashSet;
 /// The active view mode: 2D orthographic or 3D.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ViewMode {
-    #[default]
     View2D,
+    #[default]
     View3D,
 }
 

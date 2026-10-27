@@ -200,6 +200,7 @@ pub struct WgpuRenderer {
     config: Option<wgpu::SurfaceConfiguration>,
     triangle_pipeline: Option<wgpu::RenderPipeline>,
     line_pipeline: Option<wgpu::RenderPipeline>,
+    bind_group_layout: Option<wgpu::BindGroupLayout>,
     bind_group: Option<wgpu::BindGroup>,
     uniform_buffer: Option<wgpu::Buffer>,
     depth_view: Option<wgpu::TextureView>,
@@ -233,6 +234,7 @@ impl WgpuRenderer {
             config: None,
             triangle_pipeline: None,
             line_pipeline: None,
+            bind_group_layout: None,
             bind_group: None,
             uniform_buffer: None,
             depth_view: None,
@@ -366,6 +368,7 @@ impl WgpuRenderer {
         self.queue = Some(queue);
         self.config = Some(config.clone());
         self.uniform_buffer = Some(uniform_buffer);
+        self.bind_group_layout = Some(bind_group_layout);
         self.bind_group = Some(bind_group);
         self.create_depth(config.width, config.height);
     }
@@ -531,6 +534,10 @@ impl WgpuRenderer {
         let Some(bind_group) = self.bind_group.as_ref() else {
             return;
         };
+        self.draw_with(render_pass, bind_group);
+    }
+
+    fn draw_with(&self, render_pass: &mut wgpu::RenderPass<'_>, bind_group: &wgpu::BindGroup) {
         render_pass.set_bind_group(0, bind_group, &[]);
         if let (Some(pipeline), Some(buffer)) =
             (self.triangle_pipeline.as_ref(), self.triangle_buffer.as_ref())
@@ -550,6 +557,199 @@ impl WgpuRenderer {
                 render_pass.draw(0..self.num_line_vertices, 0..1);
             }
         }
+    }
+}
+
+impl WgpuRenderer {
+    /// Render the current geometry into an offscreen RGBA8 image.
+    ///
+    /// Native `QVTKStructure::ExportView2Image` grabs the 3D render window;
+    /// this renders the same pipelines and camera into an offscreen target so
+    /// the export does not depend on the compositor.
+    pub fn capture_rgba(&self, width: u32, height: u32) -> Result<Vec<u8>, GuiError> {
+        let width = width.max(1);
+        let height = height.max(1);
+        let device = self
+            .device
+            .as_ref()
+            .ok_or_else(|| GuiError::Model("renderer not initialized".into()))?;
+        let queue = self
+            .queue
+            .as_ref()
+            .ok_or_else(|| GuiError::Model("renderer not initialized".into()))?;
+        let format = self
+            .config
+            .as_ref()
+            .ok_or_else(|| GuiError::Model("renderer not initialized".into()))?
+            .format;
+        let layout = self
+            .bind_group_layout
+            .as_ref()
+            .ok_or_else(|| GuiError::Model("camera layout not initialized".into()))?;
+        let triangle_pipeline = self
+            .triangle_pipeline
+            .as_ref()
+            .ok_or_else(|| GuiError::Model("render pipeline not initialized".into()))?;
+
+        let color = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("qcsxcad capture color"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
+        let depth = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("qcsxcad capture depth"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // A dedicated camera uniform keeps the window aspect untouched.
+        let uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("qcsxcad capture camera"),
+            size: std::mem::size_of::<CameraUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(
+            &uniform,
+            0,
+            bytemuck::bytes_of(&CameraUniform {
+                view_proj: self.camera.view_proj(width as f32 / height as f32),
+            }),
+        );
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("qcsxcad capture camera bind group"),
+            layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform.as_entire_binding(),
+            }],
+        });
+
+        let padded_bytes_per_row = {
+            let unpadded = width as usize * 4;
+            ((unpadded + 255) / 256) * 256
+        };
+        let buffer_size = (padded_bytes_per_row * height as usize) as u64;
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("qcsxcad capture readback"),
+            size: buffer_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("qcsxcad capture encoder"),
+        });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("qcsxcad capture pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &color_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.1,
+                            g: 0.1,
+                            b: 0.1,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            self.draw_with(&mut pass, &bind_group);
+            drop(pass);
+        }
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &color,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_bytes_per_row as u32),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit(std::iter::once(encoder.finish()));
+
+        let slice = readback.slice(..);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result);
+        });
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|error| GuiError::Model(format!("capture poll failed: {error}")))?;
+        receiver
+            .recv()
+            .map_err(|error| GuiError::Model(format!("capture map failed: {error}")))?
+            .map_err(|error| GuiError::Model(format!("capture map error: {error:?}")))?;
+        let view = slice
+            .get_mapped_range()
+            .map_err(|error| GuiError::Model(format!("capture read failed: {error}")))?;
+        let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
+        let bgra = matches!(
+            format,
+            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+        );
+        for row in 0..height as usize {
+            let start = row * padded_bytes_per_row;
+            let end = start + width as usize * 4;
+            for pixel in view[start..end].chunks_exact(4) {
+                if bgra {
+                    rgba.extend_from_slice(&[pixel[2], pixel[1], pixel[0], 255]);
+                } else {
+                    rgba.extend_from_slice(&[pixel[0], pixel[1], pixel[2], 255]);
+                }
+            }
+        }
+        drop(view);
+        readback.unmap();
+        let _ = triangle_pipeline;
+        Ok(rgba)
     }
 }
 
@@ -587,9 +787,37 @@ impl StructureRenderer for WgpuRenderer {
         self.camera.orthographic = enabled;
     }
 
-    fn export_image(&self, _path: &str) -> Result<(), GuiError> {
-        Err(GuiError::Model("image export not yet implemented".into()))
+    fn export_image(&self, path: &str) -> Result<(), GuiError> {
+        let (width, height) = self
+            .config
+            .as_ref()
+            .map(|config| (config.width, config.height))
+            .ok_or_else(|| GuiError::Model("renderer not initialized".into()))?;
+        let rgba = self.capture_rgba(width, height)?;
+        write_png(path, width, height, &rgba)
     }
+}
+
+/// Encode RGBA8 pixels as a PNG file.
+fn write_png(path: &str, width: u32, height: u32, rgba: &[u8]) -> Result<(), GuiError> {
+    if rgba.len() != width as usize * height as usize * 4 {
+        return Err(GuiError::Model(format!(
+            "captured image is {} bytes, expected {}",
+            rgba.len(),
+            width as usize * height as usize * 4
+        )));
+    }
+    let file = std::fs::File::create(path)
+        .map_err(|error| GuiError::Model(format!("could not create {path}: {error}")))?;
+    let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), width, height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder
+        .write_header()
+        .map_err(|error| GuiError::Model(format!("PNG header failed: {error}")))?;
+    writer
+        .write_image_data(rgba)
+        .map_err(|error| GuiError::Model(format!("PNG write failed: {error}")))
 }
 
 #[cfg(test)]
@@ -662,5 +890,399 @@ mod tests {
         assert!((renderer.camera.center[0] - 0.5).abs() < 1e-6);
         assert!((renderer.camera.center[1] - 1.0).abs() < 1e-6);
         assert!((renderer.camera.center[2] - 1.5).abs() < 1e-6);
+    }
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+    use csxcad_core::model::{Primitive, Property, PropertyColor, PropertyType, Structure};
+    use qcsxcad_core::widgets::TreeWidget;
+
+    pub(super) fn test_structure() -> Structure {
+        let mut structure = Structure::new();
+        let mut property = Property::new("mat", PropertyType::Material);
+        property.set_fill_color(Some(PropertyColor::new(230, 120, 40, 255)));
+        property.add_primitive(Primitive::box_primitive([-1.0; 3], [1.0; 3]));
+        structure.add_property(property);
+        structure
+    }
+
+    fn gpu() -> Option<(wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::PRIMARY,
+            flags: wgpu::InstanceFlags::default(),
+            backend_options: Default::default(),
+            display: Default::default(),
+            memory_budget_thresholds: Default::default(),
+        });
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+            apply_limit_buckets: false,
+        }))
+        .ok()?;
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::default(),
+            label: Some("qcsxcad capture test device"),
+            trace: wgpu::Trace::default(),
+            memory_hints: wgpu::MemoryHints::default(),
+            experimental_features: wgpu::ExperimentalFeatures::default(),
+        }))
+        .ok()?;
+        Some((adapter, device, queue))
+    }
+
+    fn offscreen_config(width: u32, height: u32) -> wgpu::SurfaceConfiguration {
+        wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            width,
+            height,
+            present_mode: wgpu::PresentMode::Fifo,
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+            color_space: wgpu::SurfaceColorSpace::Auto,
+        }
+    }
+
+    fn decode(path: &std::path::Path) -> (u32, u32, Vec<u8>) {
+        let decoder = png::Decoder::new(std::fs::File::open(path).expect("open png"));
+        let mut reader = decoder.read_info().expect("png header");
+        let mut buffer = vec![0; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut buffer).expect("png frame");
+        buffer.truncate(info.buffer_size());
+        (info.width, info.height, buffer)
+    }
+
+    #[test]
+    fn png_writer_round_trips_through_the_decoder() {
+        let directory = std::env::temp_dir().join(format!(
+            "qcsxcad-png-writer-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).expect("temp dir");
+        let path = directory.join("pixel.png");
+        let rgba = vec![10u8, 20, 30, 255, 40, 50, 60, 255];
+        write_png(path.to_str().expect("path"), 2, 1, &rgba).expect("write png");
+        let (width, height, pixels) = decode(&path);
+        assert_eq!((width, height), (2, 1));
+        assert_eq!(pixels, rgba);
+        assert!(write_png(path.to_str().expect("path"), 2, 1, &rgba[..7]).is_err());
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn full_ui_screenshot() {
+        use crate::widgets::{EguiGridEditor, EguiPrimitiveEditor, EguiPropertyEditor, EguiTreeWidget};
+
+        let Some((adapter, device, queue)) = gpu() else {
+            eprintln!("skipping the UI screenshot test: no adapter available");
+            return;
+        };
+        let width = 1280u32;
+        let height = 800u32;
+        let config = offscreen_config(width, height);
+        let mut renderer = WgpuRenderer::new();
+        renderer.init(adapter, device.clone(), queue.clone(), &config);
+
+        let mut document = qcsxcad_core::document::Document::from_structure(test_structure());
+        let mut state = GuiState::new();
+        let property = document
+            .structure()
+            .property_by_index(0)
+            .and_then(|property| property.id())
+            .expect("property");
+        document
+            .apply_property_edit(property, qcsxcad_core::document::PropertyEdit::Name("substrate".into()))
+            .expect("name");
+        let box_id = document
+            .add_primitive(property, csxcad_core::model::PrimitiveType::Sphere)
+            .expect("sphere");
+        document
+            .edit_primitive(box_id, |primitive| {
+                if let csxcad_core::model::PrimitiveShape::Sphere(shape) = primitive.shape_mut() {
+                    shape.set_radius(1.5);
+                }
+            })
+            .expect("radius");
+        state.selection.properties.insert(property);
+        state.selection.primitives.insert(box_id);
+        renderer
+            .render(document.structure(), &state)
+            .expect("render geometry");
+
+        let mut tree = EguiTreeWidget::default();
+        tree.set_selection(state.selection.clone());
+        let mut property_editor = EguiPropertyEditor::default();
+        let mut primitive_editor = EguiPrimitiveEditor::default();
+        let mut grid_editor = EguiGridEditor::default();
+
+        let ctx = egui::Context::default();
+        let mut raw_input = egui::RawInput::default();
+        raw_input.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(width as f32, height as f32),
+        ));
+        let mut output = ctx.run_ui(raw_input, |ui| {
+            egui::Panel::top("status").show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.strong("QCSXCAD");
+                    ui.label("Rust GUI screenshot (offscreen wgpu)");
+                });
+            });
+            egui::Panel::left("tree")
+                .default_size(300.0)
+                .show(ui, |ui| {
+                    tree.show(ui, &mut document, &mut state);
+                });
+            egui::Panel::right("editors")
+                .default_size(380.0)
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        let _ = property_editor.show(ui, &mut document, &state);
+                        ui.separator();
+                        let _ = primitive_editor.show(ui, &mut document, &state);
+                        ui.separator();
+                        let _ = grid_editor.show(ui, &mut document);
+                    });
+                });
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE)
+                .show(ui, |_| {});
+        });
+        let paint_jobs = ctx.tessellate(output.shapes, output.pixels_per_point);
+        let mut egui_renderer = egui_wgpu::Renderer::new(
+            &device,
+            config.format,
+            egui_wgpu::RendererOptions {
+                depth_stencil_format: Some(wgpu::TextureFormat::Depth32Float),
+                ..Default::default()
+            },
+        );
+        for (id, deltas) in &output.textures_delta.set {
+            for delta in deltas {
+                egui_renderer.update_texture(&device, &queue, *id, delta);
+            }
+        }
+        output.textures_delta.set.clear();
+        output.textures_delta.free.clear();
+
+        let color = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("qcsxcad ui screenshot"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: config.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
+        let depth = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("qcsxcad ui depth"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("qcsxcad ui screenshot encoder"),
+        });
+        let screen = egui_wgpu::ScreenDescriptor {
+            size_in_pixels: [width, height],
+            pixels_per_point: output.pixels_per_point,
+        };
+        let commands = egui_renderer.update_buffers(&device, &queue, &mut encoder, &paint_jobs, &screen);
+        {
+            let render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("qcsxcad ui screenshot pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &color_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.1,
+                            g: 0.1,
+                            b: 0.1,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            let mut pass = render_pass.forget_lifetime();
+            renderer.draw_3d(&mut pass);
+            egui_renderer.render(&mut pass, &paint_jobs, &screen);
+            drop(pass);
+        }
+        queue.submit(commands);
+        queue.submit(std::iter::once(encoder.finish()));
+
+        let rgba = read_texture(&device, &queue, &color, width, height, config.format)
+            .expect("read back the screenshot");
+        let path = std::env::temp_dir().join("qcsxcad-ui.png");
+        write_png(path.to_str().expect("path"), width, height, &rgba).expect("write screenshot");
+        let (saved_width, saved_height, pixels) = decode(&path);
+        assert_eq!((saved_width, saved_height), (width, height));
+        // the UI must contain more than the flat wgpu clear color
+        let colors = pixels
+            .chunks_exact(4)
+            .map(|pixel| (pixel[0], pixel[1], pixel[2]))
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        eprintln!("UI screenshot: {path:?} ({colors} distinct colors)");
+        assert!(colors > 50, "the screenshot looks empty ({colors} colors)");
+    }
+
+    /// Read a rendered texture back as RGBA8.
+    fn read_texture(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        texture: &wgpu::Texture,
+        width: u32,
+        height: u32,
+        format: wgpu::TextureFormat,
+    ) -> Result<Vec<u8>, GuiError> {
+        let padded_bytes_per_row = {
+            let unpadded = width as usize * 4;
+            ((unpadded + 255) / 256) * 256
+        };
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("qcsxcad screenshot readback"),
+            size: (padded_bytes_per_row * height as usize) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("qcsxcad screenshot readback encoder"),
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_bytes_per_row as u32),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit(std::iter::once(encoder.finish()));
+        let slice = buffer.slice(..);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result);
+        });
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|error| GuiError::Model(format!("readback poll failed: {error}")))?;
+        receiver
+            .recv()
+            .map_err(|error| GuiError::Model(format!("readback map failed: {error}")))?
+            .map_err(|error| GuiError::Model(format!("readback map error: {error:?}")))?;
+        let view = slice
+            .get_mapped_range()
+            .map_err(|error| GuiError::Model(format!("readback failed: {error}")))?;
+        let bgra = matches!(
+            format,
+            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+        );
+        let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
+        for row in 0..height as usize {
+            let start = row * padded_bytes_per_row;
+            let end = start + width as usize * 4;
+            for pixel in view[start..end].chunks_exact(4) {
+                if bgra {
+                    rgba.extend_from_slice(&[pixel[2], pixel[1], pixel[0], 255]);
+                } else {
+                    rgba.extend_from_slice(&[pixel[0], pixel[1], pixel[2], 255]);
+                }
+            }
+        }
+        drop(view);
+        buffer.unmap();
+        Ok(rgba)
+    }
+
+    #[test]
+    fn offscreen_capture_renders_the_structure_to_a_png() {
+        let Some((adapter, device, queue)) = gpu() else {
+            eprintln!("skipping the GPU capture test: no adapter available");
+            return;
+        };
+        let config = offscreen_config(64, 48);
+        let mut renderer = WgpuRenderer::new();
+        renderer.init(adapter, device, queue, &config);
+        let structure = test_structure();
+        renderer
+            .render(&structure, &GuiState::new())
+            .expect("render geometry");
+
+        let rgba = renderer.capture_rgba(64, 48).expect("capture");
+        assert_eq!(rgba.len(), 64 * 48 * 4);
+        // the clear color is 0.1 linear; the orange box must cover pixels
+        let colored = rgba
+            .chunks_exact(4)
+            .filter(|pixel| pixel[0] > 120 && pixel[1] < 220)
+            .count();
+        assert!(colored > 100, "only {colored} non-background pixels");
+
+        let directory = std::env::temp_dir().join(format!(
+            "qcsxcad-png-capture-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).expect("temp dir");
+        let path = directory.join("view.png");
+        renderer
+            .export_image(path.to_str().expect("path"))
+            .expect("export image");
+        let (width, height, pixels) = decode(&path);
+        assert_eq!((width, height), (64, 48));
+        assert_eq!(pixels.len(), 64 * 48 * 4);
+        let colored = pixels
+            .chunks_exact(4)
+            .filter(|pixel| pixel[0] > 120 && pixel[1] < 220)
+            .count();
+        assert!(colored > 100, "the PNG lost the geometry ({colored} pixels)");
+        let _ = std::fs::remove_dir_all(&directory);
     }
 }

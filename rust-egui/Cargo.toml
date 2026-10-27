@@ -14,4 +14,8 @@ egui-wgpu = "0.37"
 wgpu = "30"
 winit = "0.30"
 bytemuck = { version = "1.14", features = ["derive"] }
+png = "0.17"
 thiserror = "2.0"
+
+[dev-dependencies]
+pollster = "0.3"

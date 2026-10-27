@@ -92,15 +92,15 @@ impl EguiTreeWidget {
         ui.heading("Structure");
         ui.horizontal(|ui| {
             if ui
-                .add_enabled(document.can_undo(), egui::Button::new("↶"))
-                .on_hover_text("Undo (Ctrl+Z)")
+                .add_enabled(document.can_undo(), egui::Button::new("Undo"))
+                .on_hover_text("Ctrl+Z")
                 .clicked()
             {
                 document.undo();
             }
             if ui
-                .add_enabled(document.can_redo(), egui::Button::new("↷"))
-                .on_hover_text("Redo (Ctrl+Shift+Z / Ctrl+Y)")
+                .add_enabled(document.can_redo(), egui::Button::new("Redo"))
+                .on_hover_text("Ctrl+Shift+Z / Ctrl+Y")
                 .clicked()
             {
                 document.redo();
@@ -139,7 +139,18 @@ impl EguiTreeWidget {
         error_label(ui, &self.last_error);
         ui.separator();
 
-        egui::ScrollArea::vertical().show(ui, |ui| {
+        // keep the selected primitives visible in the tree
+        for primitive in self.selection.primitives.iter().copied() {
+            if let Some(property) = document.structure().property_for_primitive(primitive) {
+                if let Some(property_id) = property.id() {
+                    self.expanded.insert(property_id);
+                }
+            }
+        }
+
+        egui::ScrollArea::vertical()
+            .id_salt("structure_tree_rows")
+            .show(ui, |ui| {
             let rows = tree_rows(document.structure(), |id| self.expanded.contains(&id));
             for row in rows {
                 ui.horizontal(|ui| {
@@ -148,7 +159,7 @@ impl EguiTreeWidget {
                         TreeItem::Property(id) => {
                             let expanded = self.expanded.contains(&id);
                             if ui
-                                .small_button(if expanded { "⏷" } else { "⏵" })
+                                .small_button(if expanded { "-" } else { "+" })
                                 .on_hover_text("Expand / collapse")
                                 .clicked()
                             {
@@ -158,16 +169,17 @@ impl EguiTreeWidget {
                                     self.expanded.insert(id);
                                 }
                             }
+                            let mut visible = row.visible;
                             if ui
-                                .small_button(if row.visible { "👁" } else { "—" })
+                                .checkbox(&mut visible, "")
                                 .on_hover_text("Visibility")
-                                .clicked()
+                                .changed()
                             {
                                 apply(
                                     &mut self.last_error,
                                     document.apply_property_edit(
                                         id,
-                                        PropertyEdit::Visible(!row.visible),
+                                        PropertyEdit::Visible(visible),
                                     ),
                                 );
                             }
@@ -269,6 +281,18 @@ impl EguiTreeWidget {
     }
 }
 
+impl EguiTreeWidget {
+    /// Expand every property (native `CSTree->expandAll()` after a load).
+    pub fn expand_all(&mut self, structure: &Structure) {
+        for index in 0..structure.property_count() {
+            if let Some(id) = structure.property_by_index(index).and_then(|property| property.id())
+            {
+                self.expanded.insert(id);
+            }
+        }
+    }
+}
+
 impl TreeWidget for EguiTreeWidget {
     fn refresh(&mut self, _structure: &Structure, _state: &GuiState) {
         // The tree is rebuilt from the document on each frame.
@@ -307,7 +331,9 @@ impl EguiPropertyEditor {
             return Ok(());
         }
 
-        egui::ScrollArea::vertical().show(ui, |ui| {
+        egui::ScrollArea::vertical()
+            .id_salt("property_editor")
+            .show(ui, |ui| {
             for id in selected {
                 let Some(property) = document.structure().property(id).cloned() else {
                     continue;
@@ -1096,7 +1122,9 @@ impl EguiPrimitiveEditor {
             return Ok(());
         }
 
-        egui::ScrollArea::vertical().show(ui, |ui| {
+        egui::ScrollArea::vertical()
+            .id_salt("primitive_editor")
+            .show(ui, |ui| {
             for id in selected {
                 let Some(primitive) = document.structure().primitive(id).cloned() else {
                     continue;

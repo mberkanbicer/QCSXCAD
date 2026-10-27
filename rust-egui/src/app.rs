@@ -413,6 +413,7 @@ impl EguiApp {
 
     /// Load a document (structure + editing state) into the application.
     pub fn load_document(&mut self, document: Document) {
+        self.tree_widget.expand_all(document.structure());
         self.document = Some(document);
         self.gui_state.selection.clear();
         self.gui_state.modified = false;
@@ -448,6 +449,11 @@ impl EguiApp {
         self.gui_state.selection.clear();
         self.gui_state.modified = false;
         self.tree_widget.set_selection(Selection::new());
+    }
+
+    /// Capture the 3D view into a PNG file (native `ExportView2Image`).
+    pub fn export_view_png(&self, path: &str) -> Result<(), GuiError> {
+        self.renderer.export_image(path)
     }
 
     /// Set the window title.

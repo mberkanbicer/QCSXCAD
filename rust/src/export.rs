@@ -161,7 +161,7 @@ fn write_vtp(path: &Path, mesh: &Mesh) -> Result<(), GuiError> {
     let mut polygons = Vec::new();
     let mut lines = Vec::new();
     let mut verts = Vec::new();
-    let mut push_point = |points: &mut Vec<Vertex>, vertex: &Vertex| {
+    let push_point = |points: &mut Vec<Vertex>, vertex: &Vertex| {
         points.push(*vertex);
         points.len() - 1
     };
