@@ -126,7 +126,12 @@ impl EguiApp {
         let egui_wgpu_renderer = egui_wgpu::Renderer::new(
             egui_device,
             config.format,
-            egui_wgpu::RendererOptions::default(),
+            egui_wgpu::RendererOptions {
+                // the frame renders the 3D structure with a depth attachment,
+                // so the egui pipeline has to declare the same depth state
+                depth_stencil_format: Some(wgpu::TextureFormat::Depth32Float),
+                ..Default::default()
+            },
         );
         self.egui_wgpu_renderer = Some(egui_wgpu_renderer);
 
@@ -220,6 +225,20 @@ impl EguiApp {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("qcsxcad encoder"),
         });
+        // egui requires `update_buffers` before its render pass; the command
+        // buffers it returns must be submitted with the frame
+        let screen_descriptor = egui_wgpu::ScreenDescriptor {
+            size_in_pixels: [config.width, config.height],
+            pixels_per_point: full_output.pixels_per_point,
+        };
+        let egui_command_buffers = egui_wgpu_renderer.update_buffers(
+            device,
+            queue,
+            &mut encoder,
+            &paint_jobs,
+            &screen_descriptor,
+        );
+
         let render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("qcsxcad render pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -236,7 +255,16 @@ impl EguiApp {
                 },
                 depth_slice: None,
             })],
-            depth_stencil_attachment: None,
+            depth_stencil_attachment: self.renderer.depth_view().map(|view| {
+                wgpu::RenderPassDepthStencilAttachment {
+                    view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }
+            }),
             timestamp_writes: None,
             occlusion_query_set: None,
             multiview_mask: None,
@@ -247,13 +275,10 @@ impl EguiApp {
         self.renderer.draw_3d(&mut pass);
 
         // Render egui UI.
-        let screen_descriptor = egui_wgpu::ScreenDescriptor {
-            size_in_pixels: [config.width, config.height],
-            pixels_per_point: full_output.pixels_per_point,
-        };
         egui_wgpu_renderer.render(&mut pass, &paint_jobs, &screen_descriptor);
 
         drop(pass);
+        queue.submit(egui_command_buffers);
         queue.submit(std::iter::once(encoder.finish()));
         queue.present(surface_texture);
 

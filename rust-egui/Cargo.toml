@@ -8,7 +8,7 @@ description = "egui + wgpu GUI implementation for QCSXCAD"
 [dependencies]
 qcsxcad-core = { package = "qcsxcad-core", path = "../rust" }
 csxcad-core = { package = "csxcad-core", path = "../../CSXCAD/rust" }
-egui = "0.37"
+egui = { version = "0.37", features = ["default_fonts"] }
 egui-winit = "0.37"
 egui-wgpu = "0.37"
 wgpu = "30"

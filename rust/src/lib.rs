@@ -8,9 +8,11 @@
 //! gtk, qt-rs, etc.) without coupling the data model to a specific toolkit.
 
 pub mod model;
+pub mod tessellate;
 pub mod xml;
 pub mod widgets;
 pub mod rendering;
 
 pub use model::{GuiError, GuiState, Selection};
+pub use tessellate::{Mesh, PrimitiveMesh, Tessellator};
 pub use xml::{GuiXmlError, GuiXmlWarning, read_gui_xml, write_gui_xml};
