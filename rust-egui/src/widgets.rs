@@ -854,6 +854,103 @@ fn coordinate_system_name(system: CoordinateSystem) -> &'static str {
     }
 }
 
+/// Transform controls for the selected primitive: translate, rotate, scale
+/// and reset, with one undo entry per action.
+#[derive(Clone, Debug)]
+pub struct EguiTransformEditor {
+    translate: [f64; 3],
+    rotate: [f64; 3],
+    scale: f64,
+    last_error: Option<String>,
+}
+
+impl Default for EguiTransformEditor {
+    fn default() -> Self {
+        Self {
+            translate: [0.0; 3],
+            rotate: [0.0; 3],
+            scale: 1.25,
+            last_error: None,
+        }
+    }
+}
+
+impl EguiTransformEditor {
+    pub fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        document: &mut Document,
+        state: &GuiState,
+    ) {
+        ui.heading("Transform");
+        error_label(ui, &self.last_error);
+        let Some(id) = state.selection.primitives.iter().copied().next() else {
+            ui.label("Select a primitive to transform.");
+            return;
+        };
+
+        ui.horizontal(|ui| {
+            for (axis, label) in ["dX", "dY", "dZ"].iter().enumerate() {
+                drag(ui, label, &mut self.translate[axis], 1.0e-3);
+            }
+        });
+        if ui.button("Translate").clicked() {
+            document.begin_gesture();
+            apply(
+                &mut self.last_error,
+                document.move_primitive_by(id, self.translate),
+            );
+        }
+
+        ui.horizontal(|ui| {
+            for (axis, label) in ["X°", "Y°", "Z°"].iter().enumerate() {
+                drag(ui, label, &mut self.rotate[axis], 1.0);
+            }
+        });
+        if ui.button("Rotate").clicked() {
+            document.begin_gesture();
+            for axis in 0..3 {
+                if self.rotate[axis] != 0.0 {
+                    let mut direction = [0.0; 3];
+                    direction[axis] = 1.0;
+                    apply(
+                        &mut self.last_error,
+                        document.rotate_primitive_by(
+                            id,
+                            direction,
+                            self.rotate[axis].to_radians(),
+                        ),
+                    );
+                }
+            }
+        }
+
+        ui.horizontal(|ui| {
+            ui.label("Scale");
+            ui.add(
+                egui::DragValue::new(&mut self.scale)
+                    .speed(0.01)
+                    .range(0.05..=20.0),
+            );
+            if ui.button("Apply").clicked() {
+                document.begin_gesture();
+                apply(
+                    &mut self.last_error,
+                    document.scale_primitive_by(id, self.scale),
+                );
+            }
+        });
+
+        if ui.button("Reset transform").clicked() {
+            document.begin_gesture();
+            apply(
+                &mut self.last_error,
+                document.reset_primitive_transform(id),
+            );
+        }
+    }
+}
+
 /// egui-based grid and parameter editor.
 #[derive(Clone, Debug)]
 pub struct EguiGridEditor {

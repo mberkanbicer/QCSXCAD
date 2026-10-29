@@ -7,7 +7,7 @@ pub mod app;
 pub mod renderer;
 pub mod widgets;
 
-pub use app::EguiApp;
+pub use app::{EguiApp, TransformMode};
 pub use renderer::WgpuRenderer;
 pub use widgets::{
     EguiGridEditor, EguiPrimitiveEditor, EguiPropertyEditor, EguiTreeWidget,

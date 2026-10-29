@@ -430,6 +430,85 @@ impl Document {
         self.begin_edit();
     }
 
+    /// Scale a primitive around its bounding-box centre by `factor`.
+    pub fn scale_primitive_by(
+        &mut self,
+        primitive_id: PrimitiveId,
+        factor: f64,
+    ) -> Result<(), GuiError> {
+        if !factor.is_finite() || factor <= 0.0 {
+            return Err(GuiError::Model("scale factor must be positive".to_string()));
+        }
+        let Some(primitive) = self.primitive_mut_by_id(primitive_id)? else {
+            return Err(GuiError::Model(format!(
+                "primitive {} was not found",
+                primitive_id.get()
+            )));
+        };
+        let bounds = primitive
+            .bounding_box(None, false)
+            .map_err(|error| GuiError::Model(error.to_string()))?;
+        let center = [
+            (bounds[0] + bounds[1]) * 0.5,
+            (bounds[2] + bounds[3]) * 0.5,
+            (bounds[4] + bounds[5]) * 0.5,
+        ];
+        let transform = primitive.transform_mut();
+        transform.translate([-center[0], -center[1], -center[2]], true);
+        transform.scale(factor, true);
+        transform.translate(center, true);
+        self.revision += 1;
+        self.modified = true;
+        Ok(())
+    }
+
+    /// Clear the primitive's transform (native "reset transform").
+    pub fn reset_primitive_transform(
+        &mut self,
+        primitive_id: PrimitiveId,
+    ) -> Result<(), GuiError> {
+        let Some(primitive) = self.primitive_mut_by_id(primitive_id)? else {
+            return Err(GuiError::Model(format!(
+                "primitive {} was not found",
+                primitive_id.get()
+            )));
+        };
+        primitive.transform_mut().reset();
+        self.revision += 1;
+        self.modified = true;
+        Ok(())
+    }
+
+    /// Resolve a primitive by id, mutably.
+    fn primitive_mut_by_id(
+        &mut self,
+        primitive_id: PrimitiveId,
+    ) -> Result<Option<&mut Primitive>, GuiError> {
+        let Some(property_index) = self
+            .structure
+            .property_for_primitive(primitive_id)
+            .map(|property| property.index())
+        else {
+            return Ok(None);
+        };
+        let Some(position) = self
+            .structure
+            .property_by_index(property_index)
+            .and_then(|property| {
+                property
+                    .primitives()
+                    .iter()
+                    .position(|primitive| primitive.id() == Some(primitive_id))
+            })
+        else {
+            return Ok(None);
+        };
+        Ok(self
+            .structure
+            .property_by_index_mut(property_index)
+            .and_then(|property| property.primitive_mut(position)))
+    }
+
     /// Rotate a primitive around its bounding-box centre by `angle` radians
     /// about `axis` (the viewport rotate handle; Alt+drag).
     pub fn rotate_primitive_by(
@@ -537,9 +616,9 @@ impl Document {
                 .translate(delta)
                 .map_err(|error| GuiError::Model(error.to_string()))?;
         } else {
-            return Err(GuiError::Model(
-                "this primitive type has no viewport move handle".to_string(),
-            ));
+            // Cylinders, polygons and user-defined shapes move through their
+            // transform so every type supports the viewport drag.
+            primitive.transform_mut().translate(delta, true);
         }
         self.revision += 1;
         self.modified = true;
@@ -921,6 +1000,43 @@ mod tests {
             .bounding_box(None, false)
             .expect("bounds");
         assert_eq!(restored, before);
+    }
+
+    #[test]
+    fn a_scale_gesture_resizes_around_the_centre_and_reset_clears_it() {
+        let (mut document, property) = document_with(PropertyType::Material);
+        let id = document
+            .add_primitive(property, PrimitiveType::Box)
+            .expect("box");
+        document
+            .edit_primitive(id, |primitive| {
+                let shape = primitive.box_shape_mut().expect("box shape");
+                for index in 0..6 {
+                    let value = if index % 2 == 0 { 0.0 } else { 10.0e-3 };
+                    shape.set_coordinate(index, value);
+                }
+            })
+            .expect("geometry");
+        document.begin_gesture();
+        document.scale_primitive_by(id, 2.0).expect("scale");
+        let transform = document
+            .structure()
+            .primitive(id)
+            .expect("primitive")
+            .transform()
+            .expect("transform");
+        let low = transform.transform([0.0, 0.0, 0.0]);
+        let high = transform.transform([10.0e-3, 10.0e-3, 10.0e-3]);
+        assert!((low[0] + 5.0e-3).abs() < 1.0e-12);
+        assert!((high[0] - 15.0e-3).abs() < 1.0e-12);
+        document
+            .reset_primitive_transform(id)
+            .expect("reset transform");
+        assert!(!document
+            .structure()
+            .primitive(id)
+            .expect("primitive")
+            .has_transform());
     }
 
     #[test]

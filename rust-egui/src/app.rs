@@ -11,8 +11,18 @@ use winit::window::Window;
 
 use crate::renderer::{Camera, WgpuRenderer};
 use crate::widgets::{
-    EguiGridEditor, EguiPrimitiveEditor, EguiPropertyEditor, EguiTreeWidget,
+    EguiGridEditor, EguiPrimitiveEditor, EguiPropertyEditor, EguiTransformEditor,
+    EguiTreeWidget,
 };
+
+/// Active viewport drag tool.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TransformMode {
+    #[default]
+    Move,
+    Rotate,
+    Scale,
+}
 
 /// The main QCSXCAD application: egui UI + wgpu 3D viewport.
 pub struct EguiApp {
@@ -27,6 +37,8 @@ pub struct EguiApp {
     egui_wgpu_renderer: Option<egui_wgpu::Renderer>,
     tree_widget: EguiTreeWidget,
     grid_editor: EguiGridEditor,
+    transform_editor: EguiTransformEditor,
+    transform_mode: TransformMode,
     property_editor: EguiPropertyEditor,
     primitive_editor: EguiPrimitiveEditor,
     document: Option<Document>,
@@ -56,6 +68,8 @@ impl EguiApp {
             egui_wgpu_renderer: None,
             tree_widget: EguiTreeWidget::default(),
             grid_editor: EguiGridEditor::default(),
+            transform_editor: EguiTransformEditor::default(),
+            transform_mode: TransformMode::Move,
             property_editor: EguiPropertyEditor::default(),
             primitive_editor: EguiPrimitiveEditor::default(),
             document: None,
@@ -377,6 +391,7 @@ impl EguiApp {
             property_editor,
             primitive_editor,
             grid_editor,
+            transform_editor,
             renderer,
             ..
         } = self;
@@ -480,6 +495,19 @@ impl EguiApp {
                     });
             });
 
+        egui::Panel::right("editors")
+            .default_size(340.0)
+            .show(ui, |ui| {
+                if let Some(document) = document.as_mut() {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        let _ = property_editor.show(ui, document, gui_state);
+                        ui.separator();
+                        let _ = primitive_editor.show(ui, document, gui_state);
+                        ui.separator();
+                        transform_editor.show(ui, document, gui_state);
+                    });
+                }
+            });
         // The 3D structure is drawn by the wgpu pass underneath egui, so the
         // central panel must not paint an opaque background over it. It also
         // carries the picking surface and the axis gizmo.
@@ -504,7 +532,9 @@ impl EguiApp {
                 if response.dragged() {
                     if let Some(id) = gui_state.selection.primitives.iter().copied().next() {
                         let delta = response.drag_delta();
-                        let rotate = ui.input(|input| input.modifiers.alt);
+                        let rotate = ui.input(|input| input.modifiers.alt)
+                            || self.transform_mode == TransformMode::Rotate;
+                        let scale = self.transform_mode == TransformMode::Scale;
                         let world_per_point = if camera.orthographic {
                             camera.distance / height
                         } else {
@@ -525,8 +555,12 @@ impl EguiApp {
                             (right[2] * delta.x - up[2] * delta.y) * world_per_point,
                         ];
                         if let Some(document) = document.as_mut() {
-                            if rotate {
-                                // Alt-drag rotates around the world z axis.
+                            if scale {
+                                let factor =
+                                    (1.0 + delta.x as f64 * 0.01).clamp(0.1, 10.0);
+                                let _ = document.scale_primitive_by(id, factor);
+                            } else if rotate {
+                                // Alt-drag or the Rotate tool rotates around z.
                                 let _ = document.rotate_primitive_by(
                                     id,
                                     [0.0, 0.0, 1.0],
@@ -558,17 +592,6 @@ impl EguiApp {
                 }
             });
 
-        egui::Panel::right("editors")
-            .default_size(340.0)
-            .show(ui, |ui| {
-                if let Some(document) = document.as_mut() {
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        let _ = property_editor.show(ui, document, gui_state);
-                        ui.separator();
-                        let _ = primitive_editor.show(ui, document, gui_state);
-                    });
-                }
-            });
     }
 
     /// Load a structure into the application.
@@ -700,6 +723,15 @@ impl EguiApp {
     pub fn set_parallel_projection(&mut self, enabled: bool) {
         self.gui_state.parallel_projection = enabled;
         self.renderer.set_parallel_projection(enabled);
+    }
+
+    /// Select the active viewport drag tool.
+    pub fn set_transform_mode(&mut self, mode: TransformMode) {
+        self.transform_mode = mode;
+    }
+
+    pub fn get_transform_mode(&self) -> TransformMode {
+        self.transform_mode
     }
 }
 
