@@ -394,7 +394,18 @@ impl Document {
         property_id: PropertyId,
         kind: PrimitiveType,
     ) -> Result<PrimitiveId, GuiError> {
-        let primitive = match kind {
+        self.add_primitive_with(property_id, kind, |_| {})
+    }
+
+    /// Add a primitive and configure it before the edit is recorded, so the
+    /// create-and-place step is one undo entry (native dialog semantics).
+    pub fn add_primitive_with(
+        &mut self,
+        property_id: PropertyId,
+        kind: PrimitiveType,
+        configure: impl FnOnce(&mut Primitive),
+    ) -> Result<PrimitiveId, GuiError> {
+        let mut primitive = match kind {
             PrimitiveType::Box => Primitive::box_primitive([0.0; 3], [0.0; 3]),
             PrimitiveType::MultiBox => Primitive::multibox(),
             PrimitiveType::Sphere => Primitive::sphere([0.0; 3], 0.0),
@@ -407,6 +418,7 @@ impl Document {
                 ))
             }
         };
+        configure(&mut primitive);
         self.structure_mut()
             .add_primitive(property_id, primitive)
             .map_err(|error| GuiError::Model(error.to_string()))
