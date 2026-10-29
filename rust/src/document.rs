@@ -462,6 +462,43 @@ impl Document {
         Ok(())
     }
 
+    /// Scale a primitive around its centre with per-axis factors.
+    pub fn scale_primitive_by_xyz(
+        &mut self,
+        primitive_id: PrimitiveId,
+        factors: [f64; 3],
+    ) -> Result<(), GuiError> {
+        if factors
+            .iter()
+            .any(|factor| !factor.is_finite() || *factor <= 0.0)
+        {
+            return Err(GuiError::Model(
+                "scale factors must be positive".to_string(),
+            ));
+        }
+        let Some(primitive) = self.primitive_mut_by_id(primitive_id)? else {
+            return Err(GuiError::Model(format!(
+                "primitive {} was not found",
+                primitive_id.get()
+            )));
+        };
+        let bounds = primitive
+            .bounding_box(None, false)
+            .map_err(|error| GuiError::Model(error.to_string()))?;
+        let center = [
+            (bounds[0] + bounds[1]) * 0.5,
+            (bounds[2] + bounds[3]) * 0.5,
+            (bounds[4] + bounds[5]) * 0.5,
+        ];
+        let transform = primitive.transform_mut();
+        transform.translate([-center[0], -center[1], -center[2]], true);
+        transform.scale3(factors, true);
+        transform.translate(center, true);
+        self.revision += 1;
+        self.modified = true;
+        Ok(())
+    }
+
     /// Clear the primitive's transform (native "reset transform").
     pub fn reset_primitive_transform(
         &mut self,
@@ -1000,6 +1037,39 @@ mod tests {
             .bounding_box(None, false)
             .expect("bounds");
         assert_eq!(restored, before);
+    }
+
+    #[test]
+    fn a_per_axis_scale_changes_only_the_requested_axis() {
+        let (mut document, property) = document_with(PropertyType::Material);
+        let id = document
+            .add_primitive(property, PrimitiveType::Box)
+            .expect("box");
+        document
+            .edit_primitive(id, |primitive| {
+                let shape = primitive.box_shape_mut().expect("box shape");
+                for index in 0..6 {
+                    let value = if index % 2 == 0 { 0.0 } else { 10.0e-3 };
+                    shape.set_coordinate(index, value);
+                }
+            })
+            .expect("geometry");
+        document.begin_gesture();
+        document
+            .scale_primitive_by_xyz(id, [2.0, 1.0, 1.0])
+            .expect("scale");
+        let transform = document
+            .structure()
+            .primitive(id)
+            .expect("primitive")
+            .transform()
+            .expect("transform");
+        let low = transform.transform([0.0, 0.0, 0.0]);
+        let high = transform.transform([10.0e-3, 10.0e-3, 10.0e-3]);
+        assert!((low[0] + 5.0e-3).abs() < 1.0e-12);
+        assert!((high[0] - 15.0e-3).abs() < 1.0e-12);
+        assert!((low[1]).abs() < 1.0e-12);
+        assert!((high[1] - 10.0e-3).abs() < 1.0e-12);
     }
 
     #[test]

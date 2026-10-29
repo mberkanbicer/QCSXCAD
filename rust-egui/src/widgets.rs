@@ -860,7 +860,7 @@ fn coordinate_system_name(system: CoordinateSystem) -> &'static str {
 pub struct EguiTransformEditor {
     translate: [f64; 3],
     rotate: [f64; 3],
-    scale: f64,
+    scale: [f64; 3],
     last_error: Option<String>,
 }
 
@@ -869,7 +869,7 @@ impl Default for EguiTransformEditor {
         Self {
             translate: [0.0; 3],
             rotate: [0.0; 3],
-            scale: 1.25,
+            scale: [1.25; 3],
             last_error: None,
         }
     }
@@ -927,16 +927,19 @@ impl EguiTransformEditor {
 
         ui.horizontal(|ui| {
             ui.label("Scale");
-            ui.add(
-                egui::DragValue::new(&mut self.scale)
-                    .speed(0.01)
-                    .range(0.05..=20.0),
-            );
+            for (axis, label) in ["sX", "sY", "sZ"].iter().enumerate() {
+                ui.add(
+                    egui::DragValue::new(&mut self.scale[axis])
+                        .speed(0.01)
+                        .range(0.05..=20.0),
+                )
+                .on_hover_text(*label);
+            }
             if ui.button("Apply").clicked() {
                 document.begin_gesture();
                 apply(
                     &mut self.last_error,
-                    document.scale_primitive_by(id, self.scale),
+                    document.scale_primitive_by_xyz(id, self.scale),
                 );
             }
         });
