@@ -517,6 +517,21 @@ impl WgpuRenderer {
     }
 
     /// Upload geometry and the camera matrix to the GPU.
+    /// Upload the current camera into the uniform buffer.
+    fn write_camera_uniform(&mut self) {
+        let aspect = self
+            .config
+            .as_ref()
+            .map(|config| config.width as f32 / config.height.max(1) as f32)
+            .unwrap_or(1.0);
+        let uniform = CameraUniform {
+            view_proj: self.camera.view_proj(aspect),
+        };
+        if let (Some(queue), Some(buffer)) = (self.queue.as_ref(), self.uniform_buffer.as_ref()) {
+            queue.write_buffer(buffer, 0, bytemuck::bytes_of(&uniform));
+        }
+    }
+
     fn upload_buffers(&mut self) {
         let Some(device) = self.device.as_ref() else {
             return;
@@ -553,7 +568,12 @@ impl WgpuRenderer {
     }
 
     /// Draw the 3D geometry within the given render pass.
-    pub fn draw_3d(&self, render_pass: &mut wgpu::RenderPass<'_>) {
+    ///
+    /// The camera uniform is written every frame: orbiting and zooming change
+    /// only the camera, not the geometry, so it cannot ride on the
+    /// geometry-rebuild path.
+    pub fn draw_3d(&mut self, render_pass: &mut wgpu::RenderPass<'_>) {
+        self.write_camera_uniform();
         let Some(bind_group) = self.bind_group.as_ref() else {
             return;
         };

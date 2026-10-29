@@ -179,51 +179,13 @@ impl EguiApp {
     /// Handle a winit event. Returns true if the event was consumed by egui.
     pub fn handle_event(&mut self, event: &Event<()>) -> bool {
         if let Event::WindowEvent { window_id: _, event } = event {
-            // Native navigation: middle-drag orbits and the wheel zooms,
-            // independent of the egui panels.
-            match event {
-                WindowEvent::MouseWheel { delta, .. } => {
-                    let amount = match delta {
-                        winit::event::MouseScrollDelta::LineDelta(_, y) => *y,
-                        winit::event::MouseScrollDelta::PixelDelta(position) => {
-                            position.y as f32 * 0.01
-                        }
-                    };
-                    if amount != 0.0 {
-                        let camera = self.renderer.camera_mut();
-                        camera.distance =
-                            (camera.distance * (1.0 - 0.1 * amount)).clamp(1.0e-6, 1.0e6);
-                    }
-                }
-                WindowEvent::MouseInput {
-                    state,
-                    button: winit::event::MouseButton::Middle,
-                    ..
-                } => {
-                    self.orbiting = *state == winit::event::ElementState::Pressed;
-                    if !self.orbiting {
-                        self.last_cursor = None;
-                    }
-                }
-                WindowEvent::CursorMoved { position, .. } if self.orbiting => {
-                    if let Some((last_x, last_y)) = self.last_cursor {
-                        let dx = position.x as f32 - last_x as f32;
-                        let dy = position.y as f32 - last_y as f32;
-                        let camera = self.renderer.camera_mut();
-                        camera.yaw -= dx * 0.01;
-                        camera.pitch = (camera.pitch + dy * 0.01).clamp(-1.5, 1.5);
-                    }
-                    self.last_cursor = Some((position.x, position.y));
-                }
-                WindowEvent::CursorLeft { .. } => {
-                    self.orbiting = false;
-                    self.last_cursor = None;
-                }
-                _ => {}
-            }
+            self.handle_navigation(event);
             if let Some(window) = self.window.as_ref() {
                 if let Some(egui_state) = self.egui_winit_state.as_mut() {
                     let response = egui_state.on_window_event(window, event);
+                    // Input changes the UI: repaint once (the event loop no
+                    // longer redraws continuously).
+                    window.request_redraw();
                     return response.consumed;
                 }
             }
@@ -231,11 +193,61 @@ impl EguiApp {
         false
     }
 
+    /// Native navigation, independent of the egui panels: middle-drag orbits
+    /// and the wheel zooms. Kept separate from `handle_event` so it can be
+    /// tested without a window.
+    pub fn handle_navigation(&mut self, event: &WindowEvent) {
+        match event {
+            WindowEvent::MouseWheel { delta, .. } => {
+                let amount = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(_, y) => *y,
+                    winit::event::MouseScrollDelta::PixelDelta(position) => {
+                        position.y as f32 * 0.01
+                    }
+                };
+                if amount != 0.0 {
+                    let camera = self.renderer.camera_mut();
+                    camera.distance =
+                        (camera.distance * (1.0 - 0.1 * amount)).clamp(1.0e-6, 1.0e6);
+                    trace_input(format!("zoom distance={:.5}", camera.distance));
+                }
+            }
+            WindowEvent::MouseInput {
+                state,
+                button: winit::event::MouseButton::Middle,
+                ..
+            } => {
+                self.orbiting = *state == winit::event::ElementState::Pressed;
+                if !self.orbiting {
+                    self.last_cursor = None;
+                }
+            }
+            WindowEvent::CursorMoved { position, .. } if self.orbiting => {
+                if let Some((last_x, last_y)) = self.last_cursor {
+                    let dx = position.x as f32 - last_x as f32;
+                    let dy = position.y as f32 - last_y as f32;
+                    let camera = self.renderer.camera_mut();
+                    camera.yaw -= dx * 0.01;
+                    camera.pitch = (camera.pitch + dy * 0.01).clamp(-1.5, 1.5);
+                    trace_input(format!(
+                        "orbit dx={dx:.1} dy={dy:.1} yaw={:.4} pitch={:.4}",
+                        camera.yaw, camera.pitch
+                    ));
+                }
+                self.last_cursor = Some((position.x, position.y));
+            }
+            WindowEvent::CursorLeft { .. } => {
+                self.orbiting = false;
+                self.last_cursor = None;
+            }
+            _ => {}
+        }
+    }
+
     /// Render one frame: egui UI + wgpu 3D viewport.
     pub fn render(&mut self) -> Result<(), GuiError> {
         self.render_with(|_, _, _| {})
     }
-
     /// Render one frame, letting the embedding application draw extra UI (the
     /// AppCSXCAD menu) with access to the document and the GUI state.
     pub fn render_with(
@@ -258,6 +270,30 @@ impl EguiApp {
         });
         self.egui_ctx = egui_ctx;
 
+        // Keep the swapchain in sync with the window. Maximizing the window or
+        // a DPI change can leave the surface configuration outdated, and
+        // acquiring a texture then fails until it is reconfigured.
+        if let Some(window) = self.window.as_ref() {
+            let size = window.inner_size();
+            let (width, height) = (size.width.max(1), size.height.max(1));
+            let stale = match self.config.as_ref() {
+                Some(config) => config.width != width || config.height != height,
+                None => false,
+            };
+            if stale {
+                if let (Some(config), Some(surface), Some(device)) = (
+                    self.config.as_mut(),
+                    self.surface.as_ref(),
+                    self.device.as_ref(),
+                ) {
+                    config.width = width;
+                    config.height = height;
+                    surface.configure(device, config);
+                    self.renderer.resize(surface, device, width, height);
+                }
+            }
+        }
+
         // Now re-borrow everything we need (run_ui is done, no more mutable self borrow).
         let surface = self.surface.as_ref().unwrap();
         let device = self.device.as_ref().unwrap();
@@ -278,13 +314,36 @@ impl EguiApp {
             }
         }
 
-        // Get the surface texture for this frame.
-        let surface_texture = match surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(surface_texture)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(surface_texture) => surface_texture,
-            other => {
-                eprintln!("surface get_current_texture failed: {:?}", other);
-                return Ok(());
+        // Get the surface texture for this frame. `Outdated`/`Lost` need a
+        // reconfigure; `Timeout`/`Occluded` simply skip the frame.
+        let surface_texture = {
+            let mut attempt = 0;
+            loop {
+                match surface.get_current_texture() {
+                    wgpu::CurrentSurfaceTexture::Success(surface_texture)
+                    | wgpu::CurrentSurfaceTexture::Suboptimal(surface_texture) => {
+                        break surface_texture
+                    }
+                    wgpu::CurrentSurfaceTexture::Outdated
+                    | wgpu::CurrentSurfaceTexture::Lost => {
+                        if attempt >= 2 {
+                            eprintln!("surface could not be reconfigured");
+                            trace_input("render: surface reconfigure failed");
+                            return Ok(());
+                        }
+                        attempt += 1;
+                        surface.configure(device, config);
+                    }
+                    wgpu::CurrentSurfaceTexture::Timeout
+                    | wgpu::CurrentSurfaceTexture::Occluded => {
+                        trace_input("render: surface skipped (timeout/occluded)");
+                        return Ok(());
+                    }
+                    other => {
+                        eprintln!("surface get_current_texture failed: {other:?}");
+                        return Ok(());
+                    }
+                }
             }
         };
         let view = surface_texture
@@ -374,6 +433,15 @@ impl EguiApp {
         // Handle egui platform output (cursor, clipboard, etc.).
         egui_winit_state
             .handle_platform_output(self.window.as_ref().unwrap(), full_output.platform_output);
+
+        // Only ask for another frame when egui still needs one. Redrawing
+        // unconditionally spins the event loop at 100% CPU and starves the
+        // swapchain, which shows up as a frozen window.
+        if self.egui_ctx.has_requested_repaint() {
+            if let Some(window) = self.window.as_ref() {
+                window.request_redraw();
+            }
+        }
 
         Ok(())
     }
@@ -520,18 +588,55 @@ impl EguiApp {
                 let camera = *renderer.camera();
                 let height = rect.height().max(1.0);
                 let aspect = rect.width() / height;
-                // Drag the selected primitive in the camera plane. The undo
-                // snapshot is taken once when the drag starts.
-                if response.drag_started()
-                    && gui_state.selection.primitives.iter().next().is_some()
-                {
-                    if let Some(document) = document.as_mut() {
-                        document.begin_gesture();
+                // Drag the primitive under the pointer. If nothing is selected
+                // the press picks the primitive first, so a single gesture
+                // selects and moves it.
+                if response.drag_started() {
+                    if let (Some(position), Some(document)) =
+                        (response.interact_pointer_pos(), document.as_ref())
+                    {
+                        if gui_state.selection.primitives.is_empty() {
+                            if let Some(id) = pick_primitive(
+                                renderer.camera(),
+                                document.structure(),
+                                rect,
+                                position,
+                            ) {
+                                trace_input(format!(
+                                    "pick id={} at=({:.0},{:.0})",
+                                    id.get(),
+                                    position.x,
+                                    position.y
+                                ));
+                                let mut selection = Selection::new();
+                                selection.primitives.insert(id);
+                                gui_state.selection = selection.clone();
+                                tree_widget.set_selection(selection);
+                            }
+                        }
+                    }
+                    if !gui_state.selection.primitives.is_empty() {
+                        if let Some(document) = document.as_mut() {
+                            document.begin_gesture();
+                        }
+                        if let Some(id) = gui_state.selection.primitives.iter().copied().next() {
+                            trace_input(format!(
+                                "drag_start id={} mode={:?}",
+                                id.get(),
+                                self.transform_mode
+                            ));
+                        }
                     }
                 }
                 if response.dragged() {
                     if let Some(id) = gui_state.selection.primitives.iter().copied().next() {
-                        let delta = response.drag_delta();
+                        // Per-frame pointer movement: `drag_delta` is the whole
+                        // gesture and would compound every frame.
+                        let delta = ui.input(|input| input.pointer.delta());
+                        if delta == egui::Vec2::ZERO {
+                            // Nothing moved this frame; skip the model edit.
+                            return;
+                        }
                         let rotate = ui.input(|input| input.modifiers.alt)
                             || self.transform_mode == TransformMode::Rotate;
                         let scale = self.transform_mode == TransformMode::Scale;
@@ -559,18 +664,27 @@ impl EguiApp {
                                 let factor =
                                     (1.0 + delta.x as f64 * 0.01).clamp(0.1, 10.0);
                                 let _ = document.scale_primitive_by(id, factor);
+                                trace_input(format!("scale id={} factor={factor:.5}", id.get()));
                             } else if rotate {
                                 // Alt-drag or the Rotate tool rotates around z.
-                                let _ = document.rotate_primitive_by(
-                                    id,
-                                    [0.0, 0.0, 1.0],
-                                    delta.x as f64 * 0.01,
-                                );
+                                let angle = delta.x as f64 * 0.01;
+                                let _ = document.rotate_primitive_by(id, [0.0, 0.0, 1.0], angle);
+                                trace_input(format!(
+                                    "rotate id={} angle_rad={angle:.5}",
+                                    id.get()
+                                ));
                             } else {
                                 let _ = document.move_primitive_by(
                                     id,
                                     [world[0] as f64, world[1] as f64, world[2] as f64],
                                 );
+                                trace_input(format!(
+                                    "move id={} dx={:.5e} dy={:.5e} dz={:.5e}",
+                                    id.get(),
+                                    world[0],
+                                    world[1],
+                                    world[2]
+                                ));
                             }
                         }
                     }
@@ -583,6 +697,7 @@ impl EguiApp {
                         if let Some(id) =
                             pick_primitive(renderer.camera(), document.structure(), rect, position)
                         {
+                            trace_input(format!("pick id={} at=({:.0},{:.0})", id.get(), position.x, position.y));
                             let mut selection = Selection::new();
                             selection.primitives.insert(id);
                             gui_state.selection = selection.clone();
@@ -791,6 +906,23 @@ pub fn run_event_loop(app: EguiApp, event_loop: EventLoop<()>) {
     event_loop.run_app(&mut handler).unwrap();
 }
 
+/// Append a viewport navigation/picking line to the file named by the
+/// `QCSXCAD_INPUT_TRACE` environment variable. A no-op when it is unset, so
+/// the GUI smoke automation can prove what the mouse did.
+pub fn trace_input(message: impl AsRef<str>) {
+    let Ok(path) = std::env::var("QCSXCAD_INPUT_TRACE") else {
+        return;
+    };
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        use std::io::Write as _;
+        let _ = writeln!(file, "{}", message.as_ref());
+    }
+}
+
 /// Pick the nearest primitive whose projected bounding box contains `pointer`.
 fn pick_primitive(
     camera: &Camera,
@@ -919,5 +1051,68 @@ mod pick_tests {
             pick_primitive(&camera, &structure, rect, egui::pos2(5.0, 5.0)),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod navigation_tests {
+    use super::*;
+    use winit::dpi::PhysicalPosition;
+    use winit::event::{
+        ElementState, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent,
+    };
+
+    #[test]
+    fn wheel_zooms_and_middle_drag_orbits() {
+        let mut app = EguiApp::new();
+        let distance = app.renderer.camera().distance;
+        app.handle_navigation(&WindowEvent::MouseWheel {
+            device_id: winit::event::DeviceId::dummy(),
+            delta: MouseScrollDelta::LineDelta(0.0, 1.0),
+            phase: TouchPhase::Moved,
+        });
+        assert!(
+            app.renderer.camera().distance < distance,
+            "wheel did not zoom"
+        );
+
+        let yaw = app.renderer.camera().yaw;
+        app.handle_navigation(&WindowEvent::MouseInput {
+            device_id: winit::event::DeviceId::dummy(),
+            state: ElementState::Pressed,
+            button: MouseButton::Middle,
+        });
+        app.handle_navigation(&WindowEvent::CursorMoved {
+            device_id: winit::event::DeviceId::dummy(),
+            position: PhysicalPosition::new(10.0, 10.0),
+        });
+        app.handle_navigation(&WindowEvent::CursorMoved {
+            device_id: winit::event::DeviceId::dummy(),
+            position: PhysicalPosition::new(40.0, 10.0),
+        });
+        assert!(
+            (app.renderer.camera().yaw - yaw).abs() > 1.0e-3,
+            "middle drag did not orbit"
+        );
+        app.handle_navigation(&WindowEvent::MouseInput {
+            device_id: winit::event::DeviceId::dummy(),
+            state: ElementState::Released,
+            button: MouseButton::Middle,
+        });
+    }
+
+    #[test]
+    fn cursor_without_the_middle_button_does_not_orbit() {
+        let mut app = EguiApp::new();
+        let yaw = app.renderer.camera().yaw;
+        app.handle_navigation(&WindowEvent::CursorMoved {
+            device_id: winit::event::DeviceId::dummy(),
+            position: PhysicalPosition::new(10.0, 10.0),
+        });
+        app.handle_navigation(&WindowEvent::CursorMoved {
+            device_id: winit::event::DeviceId::dummy(),
+            position: PhysicalPosition::new(40.0, 10.0),
+        });
+        assert!((app.renderer.camera().yaw - yaw).abs() < 1.0e-9);
     }
 }
