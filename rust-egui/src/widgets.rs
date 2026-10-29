@@ -169,20 +169,6 @@ impl EguiTreeWidget {
                                     self.expanded.insert(id);
                                 }
                             }
-                            let mut visible = row.visible;
-                            if ui
-                                .checkbox(&mut visible, "")
-                                .on_hover_text("Visibility")
-                                .changed()
-                            {
-                                apply(
-                                    &mut self.last_error,
-                                    document.apply_property_edit(
-                                        id,
-                                        PropertyEdit::Visible(visible),
-                                    ),
-                                );
-                            }
                             if let Some(rgba) = row.color {
                                 let (rect, _) = ui.allocate_exact_size(
                                     egui::vec2(10.0, 10.0),
@@ -200,6 +186,27 @@ impl EguiTreeWidget {
                             if ui.selectable_label(selected, &row.label).clicked() {
                                 self.select_item(document.structure(), state, row.item);
                             }
+                            // Native `Vis` column: the visibility checkbox
+                            // sits at the right edge of the row.
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    let mut visible = row.visible;
+                                    if ui
+                                        .checkbox(&mut visible, "")
+                                        .on_hover_text("Visibility")
+                                        .changed()
+                                    {
+                                        apply(
+                                            &mut self.last_error,
+                                            document.apply_property_edit(
+                                                id,
+                                                PropertyEdit::Visible(visible),
+                                            ),
+                                        );
+                                    }
+                                },
+                            );
                         }
                         TreeItem::Primitive(id) => {
                             // a small color marker keeps the rows aligned

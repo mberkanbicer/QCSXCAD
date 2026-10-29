@@ -71,8 +71,7 @@ impl Camera {
     }
 
     /// View-projection matrix (wgpu clip space, column-major).
-    pub fn view_proj(&self, aspect: f32) -> [[f32; 4]; 4] {
-        let (sin_yaw, cos_yaw) = self.yaw.sin_cos();
+    pub fn view_proj(&self, aspect: f32) -> [[f32; 4]; 4] {        let (sin_yaw, cos_yaw) = self.yaw.sin_cos();
         let (sin_pitch, cos_pitch) = self.pitch.sin_cos();
         let direction = [
             cos_pitch * cos_yaw,
@@ -92,6 +91,24 @@ impl Camera {
             perspective(45f32.to_radians(), aspect.max(1e-3), 0.01 * self.distance, 50.0 * self.distance)
         };
         multiply(projection, view)
+    }
+
+    /// Project a world point to normalised device coordinates `[x, y, z]`.
+    ///
+    /// Returns `None` when the point is behind the camera. Screen pixels use
+    /// `x = (ndc[0] + 1) * 0.5 * width`, `y = (1 - ndc[1]) * 0.5 * height`.
+    pub fn project(&self, point: [f32; 3], aspect: f32) -> Option<[f32; 3]> {
+        let view_proj = self.view_proj(aspect);
+        let mut out = [0.0f32; 4];
+        for row in 0..4 {
+            out[row] = (0..4)
+                .map(|k| view_proj[k][row] * [point[0], point[1], point[2], 1.0][k])
+                .sum();
+        }
+        if out[3] <= 0.0 {
+            return None;
+        }
+        Some([out[0] / out[3], out[1] / out[3], out[2] / out[3]])
     }
 
     /// Native 2D/3D view presets (`0..=2` axis views, `3` free 3D).

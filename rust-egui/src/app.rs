@@ -1,6 +1,6 @@
 //! Main application struct tying together egui widgets and wgpu renderer.
 
-use csxcad_core::model::{PrimitiveId, PropertyId, Structure};
+use csxcad_core::model::{PrimitiveId, PropertyId, PropertyType, Structure};
 use qcsxcad_core::document::Document;
 use qcsxcad_core::model::{GuiError, GuiState, Selection};
 use qcsxcad_core::rendering::StructureRenderer;
@@ -9,7 +9,7 @@ use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::Window;
 
-use crate::renderer::WgpuRenderer;
+use crate::renderer::{Camera, WgpuRenderer};
 use crate::widgets::{
     EguiGridEditor, EguiPrimitiveEditor, EguiPropertyEditor, EguiTreeWidget,
 };
@@ -330,6 +330,7 @@ impl EguiApp {
             property_editor,
             primitive_editor,
             grid_editor,
+            renderer,
             ..
         } = self;
 
@@ -413,10 +414,29 @@ impl EguiApp {
             });
 
         // The 3D structure is drawn by the wgpu pass underneath egui, so the
-        // central panel must not paint an opaque background over it.
+        // central panel must not paint an opaque background over it. It also
+        // carries the picking surface and the axis gizmo.
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
-            .show(ui, |_ui| {});
+            .show(ui, |ui| {
+                let rect = ui.max_rect();
+                let response = ui.allocate_rect(rect, egui::Sense::click());
+                draw_axis_gizmo(ui, rect, renderer.camera());
+                if response.clicked() {
+                    if let (Some(position), Some(document)) =
+                        (response.interact_pointer_pos(), document.as_ref())
+                    {
+                        if let Some(id) =
+                            pick_primitive(renderer.camera(), document.structure(), rect, position)
+                        {
+                            let mut selection = Selection::new();
+                            selection.primitives.insert(id);
+                            gui_state.selection = selection.clone();
+                            tree_widget.set_selection(selection);
+                        }
+                    }
+                }
+            });
 
         egui::Panel::right("editors")
             .default_size(340.0)
@@ -617,4 +637,135 @@ pub fn run_event_loop(app: EguiApp, event_loop: EventLoop<()>) {
 
     let mut handler = Handler { app };
     event_loop.run_app(&mut handler).unwrap();
+}
+
+/// Pick the nearest primitive whose projected bounding box contains `pointer`.
+fn pick_primitive(
+    camera: &Camera,
+    structure: &Structure,
+    rect: egui::Rect,
+    pointer: egui::Pos2,
+) -> Option<PrimitiveId> {
+    let aspect = rect.width() / rect.height().max(1.0);
+    let parameters = structure.parameters();
+    let mut best: Option<(f32, PrimitiveId)> = None;
+    for primitive in structure.all_primitives(false, PropertyType::Any) {
+        let Some(id) = primitive.id() else { continue };
+        let Ok(bounds) = primitive.bounding_box(Some(parameters), false) else {
+            continue;
+        };
+        let corners = [
+            [bounds[0], bounds[2], bounds[4]],
+            [bounds[0], bounds[2], bounds[5]],
+            [bounds[0], bounds[3], bounds[4]],
+            [bounds[0], bounds[3], bounds[5]],
+            [bounds[1], bounds[2], bounds[4]],
+            [bounds[1], bounds[2], bounds[5]],
+            [bounds[1], bounds[3], bounds[4]],
+            [bounds[1], bounds[3], bounds[5]],
+        ];
+        let mut min = egui::pos2(f32::INFINITY, f32::INFINITY);
+        let mut max = egui::pos2(f32::NEG_INFINITY, f32::NEG_INFINITY);
+        let mut depth = f32::INFINITY;
+        let mut visible = true;
+        for corner in corners {
+            let Some(ndc) = camera.project([corner[0] as f32, corner[1] as f32, corner[2] as f32], aspect) else {
+                visible = false;
+                break;
+            };
+            let point = egui::pos2(
+                rect.left() + (ndc[0] + 1.0) * 0.5 * rect.width(),
+                rect.top() + (1.0 - ndc[1]) * 0.5 * rect.height(),
+            );
+            min.x = min.x.min(point.x);
+            min.y = min.y.min(point.y);
+            max.x = max.x.max(point.x);
+            max.y = max.y.max(point.y);
+            depth = depth.min(ndc[2]);
+        }
+        if visible
+            && pointer.x >= min.x
+            && pointer.x <= max.x
+            && pointer.y >= min.y
+            && pointer.y <= max.y
+            && best.map_or(true, |(best_depth, _)| depth < best_depth)
+        {
+            best = Some((depth, id));
+        }
+    }
+    best.map(|(_, id)| id)
+}
+
+/// Native axis gizmo in the lower-left corner of the viewport.
+fn draw_axis_gizmo(ui: &egui::Ui, rect: egui::Rect, camera: &Camera) {
+    let aspect = rect.width() / rect.height().max(1.0);
+    let Some(origin) = camera.project(camera.center, aspect) else {
+        return;
+    };
+    let base = egui::pos2(rect.left() + 36.0, rect.bottom() - 36.0);
+    let axes = [
+        ([1.0, 0.0, 0.0], egui::Color32::from_rgb(200, 40, 40), "X"),
+        ([0.0, 1.0, 0.0], egui::Color32::from_rgb(40, 160, 40), "Y"),
+        ([0.0, 0.0, 1.0], egui::Color32::from_rgb(40, 80, 200), "Z"),
+    ];
+    for (direction, color, label) in axes {
+        let point = [
+            camera.center[0] + direction[0],
+            camera.center[1] + direction[1],
+            camera.center[2] + direction[2],
+        ];
+        let Some(projected) = camera.project(point, aspect) else {
+            continue;
+        };
+        let delta = egui::vec2(projected[0] - origin[0], -(projected[1] - origin[1]));
+        if delta.length() < 1.0e-6 {
+            continue;
+        }
+        let end = base + delta.normalized() * 28.0;
+        ui.painter()
+            .line_segment([base, end], egui::Stroke::new(1.6, color));
+        ui.painter().text(
+            end,
+            egui::Align2::CENTER_CENTER,
+            label,
+            egui::FontId::proportional(10.0),
+            color,
+        );
+    }
+}
+
+#[cfg(test)]
+mod pick_tests {
+    use super::*;
+    use csxcad_core::model::{Primitive, Property};
+
+    #[test]
+    fn clicking_the_viewport_selects_the_primitive() {
+        let mut structure = Structure::new();
+        let property = structure.add_property(Property::new("m", PropertyType::Material));
+        structure
+            .add_primitive(
+                property,
+                Primitive::box_primitive([-5.0e-3; 3], [5.0e-3; 3]),
+            )
+            .expect("box");
+        let id = structure
+            .all_primitives(false, PropertyType::Any)
+            .first()
+            .and_then(|primitive| primitive.id())
+            .expect("box id");
+
+        let mut camera = Camera::default();
+        camera.fit([-0.01, 0.01, -0.01, 0.01, -0.01, 0.01]);
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        assert_eq!(
+            pick_primitive(&camera, &structure, rect, rect.center()),
+            Some(id)
+        );
+        // A click far outside the projected box selects nothing.
+        assert_eq!(
+            pick_primitive(&camera, &structure, rect, egui::pos2(5.0, 5.0)),
+            None
+        );
+    }
 }
