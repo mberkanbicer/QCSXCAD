@@ -424,6 +424,69 @@ impl Document {
             .map_err(|error| GuiError::Model(error.to_string()))
     }
 
+    /// Start a multi-frame gesture (a viewport drag): one undo snapshot for
+    /// the whole gesture. Mutations that follow must not call `begin_edit`.
+    pub fn begin_gesture(&mut self) {
+        self.begin_edit();
+    }
+
+    /// Translate a primitive without a new undo snapshot; call
+    /// [`Self::begin_gesture`] once when the drag starts.
+    pub fn move_primitive_by(
+        &mut self,
+        primitive_id: PrimitiveId,
+        delta: [f64; 3],
+    ) -> Result<(), GuiError> {
+        let Some(property_index) = self
+            .structure
+            .property_for_primitive(primitive_id)
+            .map(|property| property.index())
+        else {
+            return Err(GuiError::Model(format!(
+                "primitive {} was not found",
+                primitive_id.get()
+            )));
+        };
+        let position = self
+            .structure
+            .property_by_index(property_index)
+            .and_then(|property| {
+                property
+                    .primitives()
+                    .iter()
+                    .position(|primitive| primitive.id() == Some(primitive_id))
+            });
+        let Some(position) = position else {
+            return Err(GuiError::Model(format!(
+                "primitive {} was not found",
+                primitive_id.get()
+            )));
+        };
+        let Some(primitive) = self
+            .structure
+            .property_by_index_mut(property_index)
+            .and_then(|property| property.primitive_mut(position))
+        else {
+            return Err(GuiError::Model("primitive was not found".to_string()));
+        };
+        if let Some(shape) = primitive.box_shape_mut() {
+            shape
+                .translate(delta)
+                .map_err(|error| GuiError::Model(error.to_string()))?;
+        } else if let Some(shape) = primitive.sphere_shape_mut() {
+            shape
+                .translate(delta)
+                .map_err(|error| GuiError::Model(error.to_string()))?;
+        } else {
+            return Err(GuiError::Model(
+                "this primitive type has no viewport move handle".to_string(),
+            ));
+        }
+        self.revision += 1;
+        self.modified = true;
+        Ok(())
+    }
+
     pub fn delete_primitive(&mut self, primitive_id: PrimitiveId) -> Result<(), GuiError> {
         if self.structure_mut().delete_primitive(primitive_id) {
             Ok(())
@@ -769,8 +832,40 @@ mod tests {
     }
 
     #[test]
-    fn only_native_creatable_property_types_are_accepted() {
-        let mut document = Document::new();
+    fn a_viewport_gesture_moves_a_primitive_and_undo_restores_it() {
+        let (mut document, property) = document_with(PropertyType::Material);
+        let id = document
+            .add_primitive(property, PrimitiveType::Box)
+            .expect("box");
+        let before = document
+            .structure()
+            .primitive(id)
+            .expect("primitive")
+            .bounding_box(None, false)
+            .expect("bounds");
+        document.begin_gesture();
+        document
+            .move_primitive_by(id, [2.0e-3, 0.0, 0.0])
+            .expect("move");
+        let after = document
+            .structure()
+            .primitive(id)
+            .expect("primitive")
+            .bounding_box(None, false)
+            .expect("bounds");
+        assert!((after[0] - before[0] - 2.0e-3).abs() < 1.0e-12);
+        assert!(document.undo());
+        let restored = document
+            .structure()
+            .primitive(id)
+            .expect("primitive")
+            .bounding_box(None, false)
+            .expect("bounds");
+        assert_eq!(restored, before);
+    }
+
+    #[test]
+    fn only_native_creatable_property_types_are_accepted() {        let mut document = Document::new();
         assert!(document.add_property(PropertyType::Any).is_err());
         assert!(document.add_property(PropertyType::Unknown).is_err());
         for property_type in CREATABLE_PROPERTY_TYPES {

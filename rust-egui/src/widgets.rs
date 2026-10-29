@@ -887,13 +887,23 @@ impl Default for EguiGridEditor {
 }
 
 impl EguiGridEditor {
-    /// Draw the grid and parameter editor.
+    /// Draw both sections (used by embedders that do not split them).
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
         document: &mut Document,
     ) -> Result<(), GuiError> {
-        ui.heading("Mesh / Parameters");
+        self.show_mesh(ui, document)?;
+        self.show_parameters(ui, document)
+    }
+
+    /// Rectilinear grid section (native `Rectilinear Grid` dock).
+    pub fn show_mesh(
+        &mut self,
+        ui: &mut egui::Ui,
+        document: &mut Document,
+    ) -> Result<(), GuiError> {
+        ui.heading("Rectilinear Grid");
         error_label(ui, &self.last_error);
 
         ui.horizontal(|ui| {
@@ -972,7 +982,15 @@ impl EguiGridEditor {
             }
         });
 
-        ui.separator();
+        Ok(())
+    }
+
+    /// Parameter section (native `Parameter` dock).
+    pub fn show_parameters(
+        &mut self,
+        ui: &mut egui::Ui,
+        document: &mut Document,
+    ) -> Result<(), GuiError> {
         ui.heading("Parameters");
         let parameters = document.structure().parameters().iter().cloned().collect::<Vec<_>>();
         let mut remove = None;
@@ -1070,6 +1088,7 @@ impl EguiGridEditor {
                 Err(error) => self.last_error = Some(error.to_string()),
             }
         }
+
 
         Ok(())
     }

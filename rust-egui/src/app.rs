@@ -455,7 +455,15 @@ impl EguiApp {
                     .default_open(true)
                     .show(ui, |ui| {
                         if let Some(document) = document.as_mut() {
-                            let _ = grid_editor.show(ui, document);
+                            let _ = grid_editor.show_mesh(ui, document);
+                        }
+                    });
+                ui.separator();
+                egui::CollapsingHeader::new("Parameter")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        if let Some(document) = document.as_mut() {
+                            let _ = grid_editor.show_parameters(ui, document);
                         }
                     });
             });
@@ -467,8 +475,51 @@ impl EguiApp {
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
                 let rect = ui.max_rect();
-                let response = ui.allocate_rect(rect, egui::Sense::click());
+                let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
                 draw_axis_gizmo(ui, rect, renderer.camera());
+                let camera = *renderer.camera();
+                let height = rect.height().max(1.0);
+                let aspect = rect.width() / height;
+                // Drag the selected primitive in the camera plane. The undo
+                // snapshot is taken once when the drag starts.
+                if response.drag_started()
+                    && gui_state.selection.primitives.iter().next().is_some()
+                {
+                    if let Some(document) = document.as_mut() {
+                        document.begin_gesture();
+                    }
+                }
+                if response.dragged() {
+                    if let Some(id) = gui_state.selection.primitives.iter().copied().next() {
+                        let delta = response.drag_delta();
+                        let world_per_point = if camera.orthographic {
+                            camera.distance / height
+                        } else {
+                            2.0 * camera.distance * (22.5f32.to_radians()).tan() / height
+                        };
+                        let (sin_yaw, cos_yaw) = camera.yaw.sin_cos();
+                        let right = [-sin_yaw, cos_yaw, 0.0];
+                        let (sin_pitch, cos_pitch) = camera.pitch.sin_cos();
+                        let forward = [-cos_pitch * cos_yaw, -cos_pitch * sin_yaw, -sin_pitch];
+                        let up = [
+                            right[1] * forward[2] - right[2] * forward[1],
+                            right[2] * forward[0] - right[0] * forward[2],
+                            right[0] * forward[1] - right[1] * forward[0],
+                        ];
+                        let world = [
+                            (right[0] * delta.x - up[0] * delta.y) * world_per_point,
+                            (right[1] * delta.x - up[1] * delta.y) * world_per_point,
+                            (right[2] * delta.x - up[2] * delta.y) * world_per_point,
+                        ];
+                        if let Some(document) = document.as_mut() {
+                            let _ = document.move_primitive_by(
+                                id,
+                                [world[0] as f64, world[1] as f64, world[2] as f64],
+                            );
+                        }
+                    }
+                }
+                let _ = aspect;
                 if response.clicked() {
                     if let (Some(position), Some(document)) =
                         (response.interact_pointer_pos(), document.as_ref())
