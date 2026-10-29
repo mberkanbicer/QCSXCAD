@@ -387,6 +387,18 @@ impl EguiApp {
         let mut visuals = egui::Visuals::light();
         visuals.panel_fill = egui::Color32::from_rgb(240, 240, 240);
         ui.ctx().set_visuals(visuals);
+        // Approximate the native Qt widget metrics (row rhythm and font size).
+        ui.ctx().all_styles_mut(|style| {
+            style.spacing.button_padding = egui::vec2(6.0, 4.0);
+            style.spacing.item_spacing = egui::vec2(6.0, 4.0);
+            style.spacing.interact_size.y = 24.0;
+            style
+                .text_styles
+                .insert(egui::TextStyle::Body, egui::FontId::proportional(14.0));
+            style
+                .text_styles
+                .insert(egui::TextStyle::Button, egui::FontId::proportional(14.0));
+        });
 
         // Document-level undo/redo. The shortcut is ignored while a text
         // field has the keyboard, so egui's own text undo still applies there.
