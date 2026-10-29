@@ -17,7 +17,7 @@ use csxcad_core::grid::CoordinateSystem;
 use csxcad_core::material::{MaterialField, MaterialProperties};
 use csxcad_core::model::{
     PrimitiveId, PrimitiveShape, PrimitiveType, Property, PropertyColor, PropertyId,
-    PropertyType, Structure,
+    PropertyType, Structure, UserDefinedCoordinateSystem,
 };
 use qcsxcad_core::document::{parse_frequency_list, Document, PropertyEdit, CREATABLE_PROPERTY_TYPES};
 use qcsxcad_core::model::{GuiError, GuiState, Selection};
@@ -895,11 +895,7 @@ impl EguiTransformEditor {
             }
         });
         if ui.button("Translate").clicked() {
-            document.begin_gesture();
-            apply(
-                &mut self.last_error,
-                document.move_primitive_by(id, self.translate),
-            );
+            self.apply_translate(document, id);
         }
 
         ui.horizontal(|ui| {
@@ -908,21 +904,7 @@ impl EguiTransformEditor {
             }
         });
         if ui.button("Rotate").clicked() {
-            document.begin_gesture();
-            for axis in 0..3 {
-                if self.rotate[axis] != 0.0 {
-                    let mut direction = [0.0; 3];
-                    direction[axis] = 1.0;
-                    apply(
-                        &mut self.last_error,
-                        document.rotate_primitive_by(
-                            id,
-                            direction,
-                            self.rotate[axis].to_radians(),
-                        ),
-                    );
-                }
-            }
+            self.apply_rotate(document, id);
         }
 
         ui.horizontal(|ui| {
@@ -936,21 +918,55 @@ impl EguiTransformEditor {
                 .on_hover_text(*label);
             }
             if ui.button("Apply").clicked() {
-                document.begin_gesture();
-                apply(
-                    &mut self.last_error,
-                    document.scale_primitive_by_xyz(id, self.scale),
-                );
+                self.apply_scale(document, id);
             }
         });
 
         if ui.button("Reset transform").clicked() {
-            document.begin_gesture();
-            apply(
-                &mut self.last_error,
-                document.reset_primitive_transform(id),
-            );
+            self.apply_reset(document, id);
         }
+    }
+
+    /// Translate button handler (also the GUI test entry point).
+    pub fn apply_translate(&mut self, document: &mut Document, id: PrimitiveId) {
+        document.begin_gesture();
+        apply(
+            &mut self.last_error,
+            document.move_primitive_by(id, self.translate),
+        );
+    }
+
+    /// Rotate button handler.
+    pub fn apply_rotate(&mut self, document: &mut Document, id: PrimitiveId) {
+        document.begin_gesture();
+        for axis in 0..3 {
+            if self.rotate[axis] != 0.0 {
+                let mut direction = [0.0; 3];
+                direction[axis] = 1.0;
+                apply(
+                    &mut self.last_error,
+                    document.rotate_primitive_by(id, direction, self.rotate[axis].to_radians()),
+                );
+            }
+        }
+    }
+
+    /// Scale button handler.
+    pub fn apply_scale(&mut self, document: &mut Document, id: PrimitiveId) {
+        document.begin_gesture();
+        apply(
+            &mut self.last_error,
+            document.scale_primitive_by_xyz(id, self.scale),
+        );
+    }
+
+    /// Reset button handler.
+    pub fn apply_reset(&mut self, document: &mut Document, id: PrimitiveId) {
+        document.begin_gesture();
+        apply(
+            &mut self.last_error,
+            document.reset_primitive_transform(id),
+        );
     }
 }
 
@@ -1591,6 +1607,64 @@ impl EguiPrimitiveEditor {
                                     );
                                 }
                             }
+                            PrimitiveShape::UserDefined(shape) => {
+                                let mut function = shape.function().to_owned();
+                                let mut coordinate_system = shape.coordinate_system();
+                                let mut shift = [0.0f64; 3];
+                                for axis in 0..3 {
+                                    shift[axis] = shape
+                                        .coordinate_shift_term(axis)
+                                        .and_then(|term| term.parse::<f64>().ok())
+                                        .unwrap_or(0.0);
+                                }
+                                let mut changed = false;
+                                ui.label("Function (boolean expression, e.g. x^2+y^2+z^2 < 1):");
+                                changed |= ui
+                                    .add(
+                                        egui::TextEdit::multiline(&mut function)
+                                            .desired_rows(2)
+                                            .desired_width(f32::INFINITY),
+                                    )
+                                    .changed();
+                                ui.horizontal(|ui| {
+                                    for (value, label) in [
+                                        (UserDefinedCoordinateSystem::Cartesian, "Cartesian"),
+                                        (UserDefinedCoordinateSystem::Cylindrical, "Cylindrical"),
+                                        (UserDefinedCoordinateSystem::Spherical, "Spherical"),
+                                    ] {
+                                        changed |= ui
+                                            .selectable_value(
+                                                &mut coordinate_system,
+                                                value,
+                                                label,
+                                            )
+                                            .changed();
+                                    }
+                                });
+                                ui.horizontal(|ui| {
+                                    for (axis, label) in ["dX", "dY", "dZ"].iter().enumerate() {
+                                        changed |= drag(ui, label, &mut shift[axis], 1.0e-3);
+                                    }
+                                });
+                                if changed {
+                                    apply(
+                                        &mut self.last_error,
+                                        document.edit_primitive(id, |primitive| {
+                                            if let PrimitiveShape::UserDefined(shape) =
+                                                primitive.shape_mut()
+                                            {
+                                                shape.set_function(function.clone());
+                                                shape.set_coordinate_system(coordinate_system);
+                                                for axis in 0..3 {
+                                                    shape.set_coordinate_shift(
+                                                        axis, shift[axis],
+                                                    );
+                                                }
+                                            }
+                                        }),
+                                    );
+                                }
+                            }
                             _ => {
                                 ui.label("This primitive type has no geometry editor yet.");
                             }
@@ -1631,6 +1705,81 @@ mod tests {
         // is a panicking contract violation in epaint
         output.textures_delta.set.clear();
         output.textures_delta.free.clear();
+    }
+
+    #[test]
+    fn transform_editor_handlers_change_the_primitive() {
+        let mut document = Document::new();
+        let property = document
+            .add_property(PropertyType::Material)
+            .expect("property");
+        let id = document
+            .add_primitive(property, PrimitiveType::Box)
+            .expect("box");
+        document
+            .edit_primitive(id, |primitive| {
+                let shape = primitive.box_shape_mut().expect("box shape");
+                for index in 0..6 {
+                    let value = if index % 2 == 0 { 0.0 } else { 10.0e-3 };
+                    shape.set_coordinate(index, value);
+                }
+            })
+            .expect("geometry");
+
+        let mut editor = EguiTransformEditor::default();
+        editor.translate = [1.0e-3, 0.0, 0.0];
+        editor.apply_translate(&mut document, id);
+        let bounds = document
+            .structure()
+            .primitive(id)
+            .expect("primitive")
+            .bounding_box(None, false)
+            .expect("bounds");
+        assert!((bounds[0] - 1.0e-3).abs() < 1.0e-12);
+
+        editor.rotate = [0.0, 0.0, 45.0];
+        editor.apply_rotate(&mut document, id);
+        assert!(document
+            .structure()
+            .primitive(id)
+            .expect("primitive")
+            .has_transform());
+
+        editor.scale = [2.0, 2.0, 2.0];
+        editor.apply_scale(&mut document, id);
+        editor.apply_reset(&mut document, id);
+        assert!(!document
+            .structure()
+            .primitive(id)
+            .expect("primitive")
+            .has_transform());
+    }
+
+    #[test]
+    fn userdefined_primitive_fields_are_editable() {
+        let mut document = Document::new();
+        let property = document
+            .add_property(PropertyType::Material)
+            .expect("property");
+        let id = document
+            .add_primitive(property, PrimitiveType::UserDefined)
+            .expect("user-defined");
+        document
+            .edit_primitive(id, |primitive| {
+                if let PrimitiveShape::UserDefined(shape) = primitive.shape_mut() {
+                    shape.set_function("x^2+y^2+z^2 < 1");
+                    shape.set_coordinate_system(UserDefinedCoordinateSystem::Spherical);
+                    shape.set_coordinate_shift(2, 1.0e-3);
+                }
+            })
+            .expect("edit");
+        let primitive = document.structure().primitive(id).expect("primitive");
+        let shape = primitive.user_defined_shape().expect("user-defined shape");
+        assert_eq!(shape.function(), "x^2+y^2+z^2 < 1");
+        assert_eq!(
+            shape.coordinate_system(),
+            UserDefinedCoordinateSystem::Spherical
+        );
     }
 
     fn document_with_every_editor() -> (Document, GuiState) {
