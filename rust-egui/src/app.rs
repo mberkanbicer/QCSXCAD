@@ -35,6 +35,9 @@ pub struct EguiApp {
     /// Discrete-material rendering state the geometry was built with.
     last_render_disc_models: bool,
     gui_state: GuiState,
+    /// Middle-button camera orbit in progress.
+    orbiting: bool,
+    last_cursor: Option<(f64, f64)>,
 }
 
 impl EguiApp {
@@ -59,6 +62,8 @@ impl EguiApp {
             last_geometry_revision: 0,
             last_render_disc_models: false,
             gui_state: GuiState::new(),
+            orbiting: false,
+            last_cursor: None,
         }
     }
 
@@ -160,6 +165,48 @@ impl EguiApp {
     /// Handle a winit event. Returns true if the event was consumed by egui.
     pub fn handle_event(&mut self, event: &Event<()>) -> bool {
         if let Event::WindowEvent { window_id: _, event } = event {
+            // Native navigation: middle-drag orbits and the wheel zooms,
+            // independent of the egui panels.
+            match event {
+                WindowEvent::MouseWheel { delta, .. } => {
+                    let amount = match delta {
+                        winit::event::MouseScrollDelta::LineDelta(_, y) => *y,
+                        winit::event::MouseScrollDelta::PixelDelta(position) => {
+                            position.y as f32 * 0.01
+                        }
+                    };
+                    if amount != 0.0 {
+                        let camera = self.renderer.camera_mut();
+                        camera.distance =
+                            (camera.distance * (1.0 - 0.1 * amount)).clamp(1.0e-6, 1.0e6);
+                    }
+                }
+                WindowEvent::MouseInput {
+                    state,
+                    button: winit::event::MouseButton::Middle,
+                    ..
+                } => {
+                    self.orbiting = *state == winit::event::ElementState::Pressed;
+                    if !self.orbiting {
+                        self.last_cursor = None;
+                    }
+                }
+                WindowEvent::CursorMoved { position, .. } if self.orbiting => {
+                    if let Some((last_x, last_y)) = self.last_cursor {
+                        let dx = position.x as f32 - last_x as f32;
+                        let dy = position.y as f32 - last_y as f32;
+                        let camera = self.renderer.camera_mut();
+                        camera.yaw -= dx * 0.01;
+                        camera.pitch = (camera.pitch + dy * 0.01).clamp(-1.5, 1.5);
+                    }
+                    self.last_cursor = Some((position.x, position.y));
+                }
+                WindowEvent::CursorLeft { .. } => {
+                    self.orbiting = false;
+                    self.last_cursor = None;
+                }
+                _ => {}
+            }
             if let Some(window) = self.window.as_ref() {
                 if let Some(egui_state) = self.egui_winit_state.as_mut() {
                     let response = egui_state.on_window_event(window, event);
