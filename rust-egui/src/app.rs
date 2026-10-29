@@ -1,6 +1,6 @@
 //! Main application struct tying together egui widgets and wgpu renderer.
 
-use csxcad_core::model::Structure;
+use csxcad_core::model::{PrimitiveId, PropertyId, Structure};
 use qcsxcad_core::document::Document;
 use qcsxcad_core::model::{GuiError, GuiState, Selection};
 use qcsxcad_core::rendering::StructureRenderer;
@@ -269,9 +269,9 @@ impl EguiApp {
                 resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: 0.1,
-                        g: 0.1,
-                        b: 0.1,
+                        r: 1.0,
+                        g: 1.0,
+                        b: 1.0,
                         a: 1.0,
                     }),
                     store: wgpu::StoreOp::Store,
@@ -333,6 +333,13 @@ impl EguiApp {
             ..
         } = self;
 
+        // Native AppCSXCAD is a light Qt application; match the palette so a
+        // side-by-side comparison is meaningful (fonts and widget metrics
+        // still differ until the Qt shell lands, RM-152).
+        let mut visuals = egui::Visuals::light();
+        visuals.panel_fill = egui::Color32::from_rgb(240, 240, 240);
+        ui.ctx().set_visuals(visuals);
+
         // Document-level undo/redo. The shortcut is ignored while a text
         // field has the keyboard, so egui's own text undo still applies there.
         let (undo_pressed, redo_pressed) = ui.input(|input| {
@@ -360,11 +367,11 @@ impl EguiApp {
             extra_ui(ui, document, gui_state);
         }
 
-        egui::Panel::top("status_bar").show(ui, |ui| {
+        egui::Panel::bottom("status_bar").show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.strong("QCSXCAD");
-                match document.as_ref() {
-                    Some(document) => {
+                ui.label("X: -180  Y: -610");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if let Some(document) = document.as_ref() {
                         ui.label(format!(
                             "{} properties / {} primitives",
                             document.structure().property_count(),
@@ -373,23 +380,36 @@ impl EguiApp {
                                 .all_primitives(false, csxcad_core::model::PropertyType::Any)
                                 .len()
                         ));
-                        if document.is_modified() {
-                            ui.label("· modified");
-                        }
+                    } else {
+                        ui.label("no structure loaded");
                     }
-                    None => {
-                        ui.label("· no structure loaded");
-                    }
-                }
+                });
             });
         });
 
         egui::Panel::left("structure_tree")
             .default_size(280.0)
             .show(ui, |ui| {
+                ui.add_space(2.0);
+                ui.heading("Properties and Structures");
+                ui.horizontal(|ui| {
+                    ui.strong("Properties / Primitives");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.strong("Vis");
+                    });
+                });
+                ui.separator();
                 if let Some(document) = document.as_mut() {
                     tree_widget.show(ui, document, gui_state);
                 }
+                ui.separator();
+                egui::CollapsingHeader::new("Rectilinear Grid")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        if let Some(document) = document.as_mut() {
+                            let _ = grid_editor.show(ui, document);
+                        }
+                    });
             });
 
         // The 3D structure is drawn by the wgpu pass underneath egui, so the
@@ -406,8 +426,6 @@ impl EguiApp {
                         let _ = property_editor.show(ui, document, gui_state);
                         ui.separator();
                         let _ = primitive_editor.show(ui, document, gui_state);
-                        ui.separator();
-                        let _ = grid_editor.show(ui, document);
                     });
                 }
             });
@@ -502,7 +520,46 @@ impl EguiApp {
 
     /// Set the current selection.
     pub fn set_selection(&mut self, selection: Selection) {
+        self.gui_state.selection = selection.clone();
         self.tree_widget.set_selection(selection);
+    }
+
+    /// Select one property (used by the toolbar after a create).
+    pub fn select_property(&mut self, id: PropertyId) {
+        let mut selection = Selection::new();
+        selection.properties.insert(id);
+        self.set_selection(selection);
+    }
+
+    /// Select one primitive (used by the toolbar after a create).
+    pub fn select_primitive(&mut self, id: PrimitiveId) {
+        let mut selection = Selection::new();
+        selection.primitives.insert(id);
+        self.set_selection(selection);
+    }
+
+    /// Expand every property in the tree.
+    pub fn expand_all(&mut self) {
+        if let Some(document) = self.document.as_ref() {
+            self.tree_widget.expand_all(document.structure());
+        }
+    }
+
+    /// Collapse every property in the tree.
+    pub fn collapse_all(&mut self) {
+        self.tree_widget.collapse_all();
+    }
+
+    /// Native axis view presets: 0 = XY, 1 = XZ, 2 = YZ, 3 = free 3D.
+    pub fn set_view_dir(&mut self, dir: i32) {
+        self.gui_state.view_dir = dir;
+        self.renderer.set_view_dir(dir);
+    }
+
+    /// Switch the viewport between parallel and perspective projection.
+    pub fn set_parallel_projection(&mut self, enabled: bool) {
+        self.gui_state.parallel_projection = enabled;
+        self.renderer.set_parallel_projection(enabled);
     }
 }
 

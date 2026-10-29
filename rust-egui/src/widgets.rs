@@ -291,6 +291,11 @@ impl EguiTreeWidget {
             }
         }
     }
+
+    /// Collapse every property (native `CSTree->collapseAll()`).
+    pub fn collapse_all(&mut self) {
+        self.expanded.clear();
+    }
 }
 
 impl TreeWidget for EguiTreeWidget {
