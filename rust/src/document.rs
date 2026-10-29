@@ -430,6 +430,65 @@ impl Document {
         self.begin_edit();
     }
 
+    /// Rotate a primitive around its bounding-box centre by `angle` radians
+    /// about `axis` (the viewport rotate handle; Alt+drag).
+    pub fn rotate_primitive_by(
+        &mut self,
+        primitive_id: PrimitiveId,
+        axis: [f64; 3],
+        angle: f64,
+    ) -> Result<(), GuiError> {
+        let Some(property_index) = self
+            .structure
+            .property_for_primitive(primitive_id)
+            .map(|property| property.index())
+        else {
+            return Err(GuiError::Model(format!(
+                "primitive {} was not found",
+                primitive_id.get()
+            )));
+        };
+        let position = self
+            .structure
+            .property_by_index(property_index)
+            .and_then(|property| {
+                property
+                    .primitives()
+                    .iter()
+                    .position(|primitive| primitive.id() == Some(primitive_id))
+            });
+        let Some(position) = position else {
+            return Err(GuiError::Model(format!(
+                "primitive {} was not found",
+                primitive_id.get()
+            )));
+        };
+        let Some(primitive) = self
+            .structure
+            .property_by_index_mut(property_index)
+            .and_then(|property| property.primitive_mut(position))
+        else {
+            return Err(GuiError::Model("primitive was not found".to_string()));
+        };
+        let bounds = primitive
+            .bounding_box(None, false)
+            .map_err(|error| GuiError::Model(error.to_string()))?;
+        let center = [
+            (bounds[0] + bounds[1]) * 0.5,
+            (bounds[2] + bounds[3]) * 0.5,
+            (bounds[4] + bounds[5]) * 0.5,
+        ];
+        let transform = primitive.transform_mut();
+        transform.translate([-center[0], -center[1], -center[2]], true);
+        transform
+            .rotate_origin(axis, angle, true)
+            .map_err(|error| GuiError::Model(error.to_string()))?;
+        transform.translate(center, true);
+        self.revision += 1;
+        self.modified = true;
+        Ok(())
+    }
+
     /// Translate a primitive without a new undo snapshot; call
     /// [`Self::begin_gesture`] once when the drag starts.
     pub fn move_primitive_by(
@@ -862,6 +921,34 @@ mod tests {
             .bounding_box(None, false)
             .expect("bounds");
         assert_eq!(restored, before);
+    }
+
+    #[test]
+    fn a_viewport_rotation_is_one_undo_step() {
+        let (mut document, property) = document_with(PropertyType::Material);
+        let id = document
+            .add_primitive(property, PrimitiveType::Box)
+            .expect("box");
+        assert!(!document
+            .structure()
+            .primitive(id)
+            .expect("primitive")
+            .has_transform());
+        document.begin_gesture();
+        document
+            .rotate_primitive_by(id, [0.0, 0.0, 1.0], 0.5)
+            .expect("rotate");
+        assert!(document
+            .structure()
+            .primitive(id)
+            .expect("primitive")
+            .has_transform());
+        assert!(document.undo());
+        assert!(!document
+            .structure()
+            .primitive(id)
+            .expect("primitive")
+            .has_transform());
     }
 
     #[test]

@@ -492,6 +492,7 @@ impl EguiApp {
                 if response.dragged() {
                     if let Some(id) = gui_state.selection.primitives.iter().copied().next() {
                         let delta = response.drag_delta();
+                        let rotate = ui.input(|input| input.modifiers.alt);
                         let world_per_point = if camera.orthographic {
                             camera.distance / height
                         } else {
@@ -512,10 +513,19 @@ impl EguiApp {
                             (right[2] * delta.x - up[2] * delta.y) * world_per_point,
                         ];
                         if let Some(document) = document.as_mut() {
-                            let _ = document.move_primitive_by(
-                                id,
-                                [world[0] as f64, world[1] as f64, world[2] as f64],
-                            );
+                            if rotate {
+                                // Alt-drag rotates around the world z axis.
+                                let _ = document.rotate_primitive_by(
+                                    id,
+                                    [0.0, 0.0, 1.0],
+                                    delta.x as f64 * 0.01,
+                                );
+                            } else {
+                                let _ = document.move_primitive_by(
+                                    id,
+                                    [world[0] as f64, world[1] as f64, world[2] as f64],
+                                );
+                            }
                         }
                     }
                 }
