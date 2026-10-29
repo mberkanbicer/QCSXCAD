@@ -1046,7 +1046,7 @@ impl EguiGridEditor {
                                 document.set_grid_line(self.axis, index, value),
                             );
                         }
-                        if ui.small_button("✕").clicked() {
+                        if ui.small_button("x").clicked() {
                             remove = Some(index);
                         }
                     });
@@ -1109,7 +1109,7 @@ impl EguiGridEditor {
                             document.set_parameter_value(index, value),
                         );
                     }
-                    if ui.small_button("✕").clicked() {
+                    if ui.small_button("x").clicked() {
                         remove = Some(index);
                     }
                 });
@@ -1445,7 +1445,7 @@ impl EguiPrimitiveEditor {
                                                 ),
                                             );
                                         }
-                                        if ui.small_button("✕").clicked() {
+                                        if ui.small_button("x").clicked() {
                                             remove = Some(index);
                                         }
                                     });
