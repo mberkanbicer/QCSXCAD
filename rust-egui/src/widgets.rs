@@ -24,6 +24,8 @@ use qcsxcad_core::model::{GuiError, GuiState, Selection};
 use qcsxcad_core::tree::{tree_rows, TreeItem};
 use qcsxcad_core::widgets::TreeWidget;
 
+use crate::theme;
+
 /// Shared error line for the editors.
 fn error_label(ui: &mut egui::Ui, error: &Option<String>) {
     if let Some(message) = error {
@@ -89,7 +91,6 @@ impl EguiTreeWidget {
         document: &mut Document,
         state: &mut GuiState,
     ) {
-        ui.heading("Structure");
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(document.can_undo(), egui::Button::new("Undo"))
@@ -138,6 +139,21 @@ impl EguiTreeWidget {
         });
         error_label(ui, &self.last_error);
         ui.separator();
+        let palette = theme::palette(ui.ctx());
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("PROPERTIES / PRIMITIVES")
+                    .small()
+                    .color(palette.text_tertiary),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    egui::RichText::new("VIS")
+                        .small()
+                        .color(palette.text_tertiary),
+                );
+            });
+        });
 
         // keep the selected primitives visible in the tree
         for primitive in self.selection.primitives.iter().copied() {
@@ -148,47 +164,98 @@ impl EguiTreeWidget {
             }
         }
 
+        // Delete removes the selected node after the same confirmation the
+        // Delete button uses, unless a text field owns the keyboard.
+        if !ui.ctx().egui_wants_keyboard_input() && ui.input(|input| input.key_pressed(egui::Key::Delete))
+        {
+            self.pending_delete = self
+                .selection
+                .properties
+                .iter()
+                .copied()
+                .next()
+                .map(TreeItem::Property)
+                .or_else(|| {
+                    self.selection
+                        .primitives
+                        .iter()
+                        .copied()
+                        .next()
+                        .map(TreeItem::Primitive)
+                });
+        }
+
+        let mut select_item = None;
+        let mut toggle_expand = None;
+        let mut request_delete = None;
+        let mut set_visibility = None;
+        let palette = theme::palette(ui.ctx());
+
         egui::ScrollArea::vertical()
             .id_salt("structure_tree_rows")
             .show(ui, |ui| {
-            let rows = tree_rows(document.structure(), |id| self.expanded.contains(&id));
-            for row in rows {
-                ui.horizontal(|ui| {
-                    ui.add_space(row.depth as f32 * 14.0);
+                let rows = tree_rows(document.structure(), |id| self.expanded.contains(&id));
+                for row in rows {
+                    let selected = match row.item {
+                        TreeItem::Property(id) => self.selection.properties.contains(&id),
+                        TreeItem::Primitive(id) => self.selection.primitives.contains(&id),
+                    };
+                    let width = ui.available_width();
+                    let (rect, response) = ui.allocate_exact_size(
+                        egui::vec2(width, theme::ROW_HEIGHT),
+                        egui::Sense::click(),
+                    );
+                    let painter = ui.painter().clone();
+                    if selected {
+                        painter.rect_filled(
+                            rect,
+                            egui::CornerRadius::same(theme::RADIUS_INPUT),
+                            palette.selection,
+                        );
+                        painter.rect_filled(
+                            egui::Rect::from_min_size(rect.min, egui::vec2(3.0, rect.height())),
+                            egui::CornerRadius::ZERO,
+                            palette.accent,
+                        );
+                    } else if response.hovered() {
+                        painter.rect_filled(
+                            rect,
+                            egui::CornerRadius::same(theme::RADIUS_INPUT),
+                            palette.hover,
+                        );
+                    }
+
+                    let mut row_ui = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(rect.shrink2(egui::vec2(8.0, 0.0)))
+                            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                    );
+                    row_ui.add_space(row.depth as f32 * 14.0);
                     match row.item {
                         TreeItem::Property(id) => {
                             let expanded = self.expanded.contains(&id);
-                            if ui
+                            if row_ui
                                 .small_button(if expanded { "-" } else { "+" })
                                 .on_hover_text("Expand / collapse")
                                 .clicked()
                             {
-                                if expanded {
-                                    self.expanded.remove(&id);
-                                } else {
-                                    self.expanded.insert(id);
-                                }
+                                toggle_expand = Some(id);
                             }
                             if let Some(rgba) = row.color {
-                                let (rect, _) = ui.allocate_exact_size(
+                                let (swatch, _) = row_ui.allocate_exact_size(
                                     egui::vec2(10.0, 10.0),
                                     egui::Sense::hover(),
                                 );
-                                ui.painter().rect_filled(
-                                    rect,
-                                    1.0,
+                                row_ui.painter().rect_filled(
+                                    swatch,
+                                    egui::CornerRadius::same(2),
                                     egui::Color32::from_rgba_unmultiplied(
                                         rgba[0], rgba[1], rgba[2], rgba[3],
                                     ),
                                 );
                             }
-                            let selected = self.selection.properties.contains(&id);
-                            if ui.selectable_label(selected, &row.label).clicked() {
-                                self.select_item(document.structure(), state, row.item);
-                            }
-                            // Native `Vis` column: the visibility checkbox
-                            // sits at the right edge of the row.
-                            ui.with_layout(
+                            row_ui.label(egui::RichText::new(&row.label).color(palette.text));
+                            row_ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
                                     let mut visible = row.visible;
@@ -197,32 +264,68 @@ impl EguiTreeWidget {
                                         .on_hover_text("Visibility")
                                         .changed()
                                     {
-                                        apply(
-                                            &mut self.last_error,
-                                            document.apply_property_edit(
-                                                id,
-                                                PropertyEdit::Visible(visible),
-                                            ),
-                                        );
+                                        set_visibility = Some((id, visible));
                                     }
                                 },
                             );
                         }
-                        TreeItem::Primitive(id) => {
-                            // a small color marker keeps the rows aligned
-                            ui.add_space(14.0);
-                            let selected = self.selection.primitives.contains(&id);
-                            if ui.selectable_label(selected, &row.label).clicked() {
-                                self.select_item(document.structure(), state, row.item);
-                            }
+                        TreeItem::Primitive(_) => {
+                            row_ui.add_space(18.0);
+                            row_ui.label(egui::RichText::new(&row.label).color(palette.text));
                         }
                     }
-                });
-            }
-            if document.structure().property_count() == 0 {
-                ui.label("No properties. Use “+ Property” to create one.");
-            }
-        });
+
+                    if response.clicked() {
+                        select_item = Some(row.item);
+                    }
+                    if response.double_clicked() {
+                        if let TreeItem::Property(id) = row.item {
+                            toggle_expand = Some(id);
+                        }
+                    }
+                    response.context_menu(|ui| {
+                        if ui.button("Delete").clicked() {
+                            request_delete = Some(row.item);
+                            ui.close();
+                        }
+                        if let TreeItem::Property(id) = row.item {
+                            let label = if row.visible { "Hide" } else { "Show" };
+                            if ui.button(label).clicked() {
+                                set_visibility = Some((id, !row.visible));
+                                ui.close();
+                            }
+                        }
+                    });
+                }
+                if document.structure().property_count() == 0 {
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new("No properties yet. Use + Property to create one.")
+                            .color(palette.text_tertiary)
+                            .italics(),
+                    );
+                }
+
+                if let Some(id) = toggle_expand {
+                    if self.expanded.contains(&id) {
+                        self.expanded.remove(&id);
+                    } else {
+                        self.expanded.insert(id);
+                    }
+                }
+                if let Some((id, visible)) = set_visibility {
+                    apply(
+                        &mut self.last_error,
+                        document.apply_property_edit(id, PropertyEdit::Visible(visible)),
+                    );
+                }
+                if let Some(item) = select_item {
+                    self.select_item(document.structure(), state, item);
+                }
+                if let Some(item) = request_delete {
+                    self.pending_delete = Some(item);
+                }
+            });
 
         self.show_delete_confirmation(ui, document, state);
     }
@@ -1019,7 +1122,6 @@ impl EguiGridEditor {
         ui: &mut egui::Ui,
         document: &mut Document,
     ) -> Result<(), GuiError> {
-        ui.heading("Rectilinear Grid");
         error_label(ui, &self.last_error);
 
         ui.horizontal(|ui| {
@@ -1107,7 +1209,6 @@ impl EguiGridEditor {
         ui: &mut egui::Ui,
         document: &mut Document,
     ) -> Result<(), GuiError> {
-        ui.heading("Parameters");
         let parameters = document.structure().parameters().iter().cloned().collect::<Vec<_>>();
         let mut remove = None;
         for (index, parameter) in parameters.iter().enumerate() {
@@ -1169,7 +1270,10 @@ impl EguiGridEditor {
         ui.separator();
         ui.horizontal(|ui| {
             ui.label("New:");
-            ui.text_edit_singleline(&mut self.new_parameter);
+            ui.add(
+                egui::TextEdit::singleline(&mut self.new_parameter)
+                    .desired_width(130.0),
+            );
             ui.add(egui::DragValue::new(&mut self.new_parameter_value).speed(0.01));
             ui.checkbox(&mut self.new_parameter_linear, "linear");
         });

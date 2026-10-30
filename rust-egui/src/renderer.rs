@@ -67,7 +67,7 @@ impl Camera {
             .sqrt()
             .max(1e-6);
         self.center = center;
-        self.distance = 1.4 * diagonal;
+        self.distance = 1.75 * diagonal;
     }
 
     /// View-projection matrix (wgpu clip space, column-major).
@@ -109,6 +109,56 @@ impl Camera {
             return None;
         }
         Some([out[0] / out[3], out[1] / out[3], out[2] / out[3]])
+    }
+
+    /// The camera position and the world-space direction through a normalised
+    /// device coordinate `(x, y)`, for picking on a plane (status bar).
+    pub fn ray(&self, ndc: [f32; 2], aspect: f32) -> ([f32; 3], [f32; 3]) {
+        let (sin_yaw, cos_yaw) = self.yaw.sin_cos();
+        let (sin_pitch, cos_pitch) = self.pitch.sin_cos();
+        let to_eye = [cos_pitch * cos_yaw, cos_pitch * sin_yaw, sin_pitch];
+        let eye = [
+            self.center[0] + self.distance * to_eye[0],
+            self.center[1] + self.distance * to_eye[1],
+            self.center[2] + self.distance * to_eye[2],
+        ];
+        let forward = [-to_eye[0], -to_eye[1], -to_eye[2]];
+        // `right = forward x world_up`, `up = right x forward`.
+        let mut right = [
+            forward[1] * 1.0 - forward[2] * 0.0,
+            forward[2] * 0.0 - forward[0] * 1.0,
+            forward[0] * 0.0 - forward[1] * 0.0,
+        ];
+        let right_length = (right[0] * right[0] + right[1] * right[1] + right[2] * right[2])
+            .sqrt()
+            .max(1e-6);
+        right = [
+            right[0] / right_length,
+            right[1] / right_length,
+            right[2] / right_length,
+        ];
+        let up = [
+            right[1] * forward[2] - right[2] * forward[1],
+            right[2] * forward[0] - right[0] * forward[2],
+            right[0] * forward[1] - right[1] * forward[0],
+        ];
+        if self.orthographic {
+            let half = self.distance * 0.5;
+            let origin = [
+                eye[0] + right[0] * ndc[0] * half * aspect + up[0] * ndc[1] * half,
+                eye[1] + right[1] * ndc[0] * half * aspect + up[1] * ndc[1] * half,
+                eye[2] + right[2] * ndc[0] * half * aspect + up[2] * ndc[1] * half,
+            ];
+            (origin, forward)
+        } else {
+            let tan_half = 22.5f32.to_radians().tan();
+            let direction = [
+                forward[0] + right[0] * ndc[0] * tan_half * aspect + up[0] * ndc[1] * tan_half,
+                forward[1] + right[1] * ndc[0] * tan_half * aspect + up[1] * ndc[1] * tan_half,
+                forward[2] + right[2] * ndc[0] * tan_half * aspect + up[2] * ndc[1] * tan_half,
+            ];
+            (eye, direction)
+        }
     }
 
     /// Native 2D/3D view presets (`0..=2` axis views, `3` free 3D).
@@ -231,6 +281,10 @@ pub struct WgpuRenderer {
     camera: Camera,
     /// Fit the camera to the geometry on the next render.
     auto_fit: bool,
+    /// Bounds of the last uploaded geometry (`[xmin, xmax, ...]`).
+    bounds: Option<[f64; 6]>,
+    /// Viewport clear colour (follows the active theme).
+    background: [f64; 3],
     /// Cached vertex data for the current structure.
     triangle_vertices: Vec<Vertex>,
     line_vertices: Vec<Vertex>,
@@ -266,6 +320,8 @@ impl WgpuRenderer {
             parallel_projection: false,
             camera: Camera::default(),
             auto_fit: true,
+            bounds: None,
+            background: [1.0, 1.0, 1.0],
             triangle_vertices: Vec::new(),
             line_vertices: Vec::new(),
             render_discrete_models: false,
@@ -486,34 +542,64 @@ impl WgpuRenderer {
         }
         self.num_triangle_vertices = self.triangle_vertices.len() as u32;
         self.num_line_vertices = self.line_vertices.len() as u32;
+        // Record the bounds of everything that was uploaded so `Fit All` can
+        // recover the framing after the camera has been moved.
+        let mut bounds: Option<[f64; 6]> = None;
+        for position in self
+            .triangle_vertices
+            .iter()
+            .chain(self.line_vertices.iter())
+            .map(|vertex| vertex.position)
+        {
+            let position = [
+                position[0] as f64,
+                position[1] as f64,
+                position[2] as f64,
+            ];
+            bounds = Some(match bounds {
+                None => [
+                    position[0], position[0], position[1], position[1], position[2], position[2],
+                ],
+                Some(bounds) => [
+                    bounds[0].min(position[0]),
+                    bounds[1].max(position[0]),
+                    bounds[2].min(position[1]),
+                    bounds[3].max(position[1]),
+                    bounds[4].min(position[2]),
+                    bounds[5].max(position[2]),
+                ],
+            });
+        }
+        self.bounds = bounds;
         if self.auto_fit {
-            let mut bounds: Option<[f64; 6]> = None;
-            for vertex in &self.triangle_vertices {
-                let position = [
-                    vertex.position[0] as f64,
-                    vertex.position[1] as f64,
-                    vertex.position[2] as f64,
-                ];
-                bounds = Some(match bounds {
-                    None => [
-                        position[0], position[0], position[1], position[1],
-                        position[2], position[2],
-                    ],
-                    Some(bounds) => [
-                        bounds[0].min(position[0]),
-                        bounds[1].max(position[0]),
-                        bounds[2].min(position[1]),
-                        bounds[3].max(position[1]),
-                        bounds[4].min(position[2]),
-                        bounds[5].max(position[2]),
-                    ],
-                });
-            }
             if let Some(bounds) = bounds {
                 self.camera.fit(bounds);
                 self.auto_fit = false;
             }
         }
+    }
+
+    /// Bounds of the geometry currently uploaded, if any.
+    pub fn bounds(&self) -> Option<[f64; 6]> {
+        self.bounds
+    }
+
+    /// Frame all geometry (Fit All).
+    pub fn fit_all(&mut self) {
+        if let Some(bounds) = self.bounds {
+            self.camera.fit(bounds);
+            self.auto_fit = false;
+        }
+    }
+
+    /// Set the viewport clear colour (0..1 RGB).
+    pub fn set_background(&mut self, rgb: [f64; 3]) {
+        self.background = rgb;
+    }
+
+    /// The viewport clear colour (0..1 RGB).
+    pub fn background(&self) -> [f64; 3] {
+        self.background
     }
 
     /// Upload geometry and the camera matrix to the GPU.
@@ -934,6 +1020,67 @@ mod tests {
         assert!((renderer.camera.center[0] - 0.5).abs() < 1e-6);
         assert!((renderer.camera.center[1] - 1.0).abs() < 1e-6);
         assert!((renderer.camera.center[2] - 1.5).abs() < 1e-6);
+    }
+}
+
+#[cfg(test)]
+mod camera_ray_tests {
+    use super::*;
+
+    #[test]
+    fn the_center_ray_passes_through_the_camera_center() {
+        let mut camera = Camera::default();
+        camera.fit([-1.0, 1.0, -1.0, 1.0, -1.0, 1.0]);
+        let (origin, direction) = camera.ray([0.0, 0.0], 1.5);
+        let length = (direction[0] * direction[0]
+            + direction[1] * direction[1]
+            + direction[2] * direction[2])
+            .sqrt();
+        let direction = [
+            direction[0] / length,
+            direction[1] / length,
+            direction[2] / length,
+        ];
+        // Walk from the eye towards the centre and compare.
+        let distance = ((camera.center[0] - origin[0]).powi(2)
+            + (camera.center[1] - origin[1]).powi(2)
+            + (camera.center[2] - origin[2]).powi(2))
+        .sqrt();
+        let point = [
+            origin[0] + direction[0] * distance,
+            origin[1] + direction[1] * distance,
+            origin[2] + direction[2] * distance,
+        ];
+        for axis in 0..3 {
+            assert!(
+                (point[axis] - camera.center[axis]).abs() < 1.0e-4,
+                "axis {axis}: {} vs {}",
+                point[axis],
+                camera.center[axis]
+            );
+        }
+    }
+
+    #[test]
+    fn a_projected_point_lies_on_its_ray() {
+        let mut camera = Camera::default();
+        camera.fit([-2.0, 2.0, -2.0, 2.0, -2.0, 2.0]);
+        let point = [0.4, -0.3, 0.6];
+        let ndc = camera.project(point, 1.5).expect("projected");
+        let (origin, direction) = camera.ray([ndc[0], ndc[1]], 1.5);
+        // The point minus the origin must be parallel to the direction.
+        let offset = [
+            point[0] - origin[0],
+            point[1] - origin[1],
+            point[2] - origin[2],
+        ];
+        let cross = [
+            offset[1] * direction[2] - offset[2] * direction[1],
+            offset[2] * direction[0] - offset[0] * direction[2],
+            offset[0] * direction[1] - offset[1] * direction[0],
+        ];
+        let error = (cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]).sqrt();
+        assert!(error < 1.0e-4, "ray misses the point by {error}");
     }
 }
 

@@ -4,25 +4,19 @@ use csxcad_core::model::{PrimitiveId, PropertyId, PropertyType, Structure};
 use qcsxcad_core::document::Document;
 use qcsxcad_core::model::{GuiError, GuiState, Selection};
 use qcsxcad_core::rendering::StructureRenderer;
-use qcsxcad_core::widgets::TreeWidget;
+use qcsxcad_core::widgets::{TransformMode, TreeWidget};
+
+pub use qcsxcad_core::widgets::TransformMode as SharedTransformMode;
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::Window;
 
 use crate::renderer::{Camera, WgpuRenderer};
+use crate::theme;
 use crate::widgets::{
     EguiGridEditor, EguiPrimitiveEditor, EguiPropertyEditor, EguiTransformEditor,
     EguiTreeWidget,
 };
-
-/// Active viewport drag tool.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum TransformMode {
-    #[default]
-    Move,
-    Rotate,
-    Scale,
-}
 
 /// The main QCSXCAD application: egui UI + wgpu 3D viewport.
 pub struct EguiApp {
@@ -38,7 +32,6 @@ pub struct EguiApp {
     tree_widget: EguiTreeWidget,
     grid_editor: EguiGridEditor,
     transform_editor: EguiTransformEditor,
-    transform_mode: TransformMode,
     property_editor: EguiPropertyEditor,
     primitive_editor: EguiPrimitiveEditor,
     document: Option<Document>,
@@ -49,6 +42,10 @@ pub struct EguiApp {
     gui_state: GuiState,
     /// Middle-button camera orbit in progress.
     orbiting: bool,
+    /// Viewport rectangle from the last frame (status bar unprojection).
+    viewport_rect: egui::Rect,
+    /// Last pointer position in egui points (navigation gating).
+    last_pointer: Option<egui::Pos2>,
     last_cursor: Option<(f64, f64)>,
 }
 
@@ -69,7 +66,6 @@ impl EguiApp {
             tree_widget: EguiTreeWidget::default(),
             grid_editor: EguiGridEditor::default(),
             transform_editor: EguiTransformEditor::default(),
-            transform_mode: TransformMode::Move,
             property_editor: EguiPropertyEditor::default(),
             primitive_editor: EguiPrimitiveEditor::default(),
             document: None,
@@ -77,6 +73,8 @@ impl EguiApp {
             last_render_disc_models: false,
             gui_state: GuiState::new(),
             orbiting: false,
+            viewport_rect: egui::Rect::NOTHING,
+            last_pointer: None,
             last_cursor: None,
         }
     }
@@ -193,6 +191,15 @@ impl EguiApp {
         false
     }
 
+    /// True when the pointer was over the 3D viewport on the last frame.
+    /// Navigation is confined to the viewport so scrolling the tree does not
+    /// zoom the camera.
+    fn pointer_over_viewport(&self) -> bool {
+        self.last_pointer
+            .map(|position| self.viewport_rect.contains(position))
+            .unwrap_or(false)
+    }
+
     /// Native navigation, independent of the egui panels: middle-drag orbits
     /// and the wheel zooms. Kept separate from `handle_event` so it can be
     /// tested without a window.
@@ -205,7 +212,7 @@ impl EguiApp {
                         position.y as f32 * 0.01
                     }
                 };
-                if amount != 0.0 {
+                if amount != 0.0 && self.pointer_over_viewport() {
                     let camera = self.renderer.camera_mut();
                     camera.distance =
                         (camera.distance * (1.0 - 0.1 * amount)).clamp(1.0e-6, 1.0e6);
@@ -217,12 +224,21 @@ impl EguiApp {
                 button: winit::event::MouseButton::Middle,
                 ..
             } => {
-                self.orbiting = *state == winit::event::ElementState::Pressed;
+                self.orbiting = *state == winit::event::ElementState::Pressed
+                    && self.pointer_over_viewport();
                 if !self.orbiting {
                     self.last_cursor = None;
                 }
             }
-            WindowEvent::CursorMoved { position, .. } if self.orbiting => {
+            WindowEvent::CursorMoved { position, .. } => {
+                let points = self.egui_ctx.pixels_per_point().max(1.0e-3);
+                self.last_pointer = Some(egui::pos2(
+                    position.x as f32 / points,
+                    position.y as f32 / points,
+                ));
+                if !self.orbiting {
+                    return;
+                }
                 if let Some((last_x, last_y)) = self.last_cursor {
                     let dx = position.x as f32 - last_x as f32;
                     let dy = position.y as f32 - last_y as f32;
@@ -364,7 +380,9 @@ impl EguiApp {
             }
         }
 
-        // Begin render pass.
+        // Begin render pass. The clear colour follows the active theme so the
+        // viewport reads as part of the workbench.
+        let [clear_r, clear_g, clear_b] = self.renderer.background();
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("qcsxcad encoder"),
         });
@@ -389,9 +407,9 @@ impl EguiApp {
                 resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: 1.0,
-                        g: 1.0,
-                        b: 1.0,
+                        r: clear_r,
+                        g: clear_g,
+                        b: clear_b,
                         a: 1.0,
                     }),
                     store: wgpu::StoreOp::Store,
@@ -461,27 +479,14 @@ impl EguiApp {
             grid_editor,
             transform_editor,
             renderer,
+            viewport_rect,
             ..
         } = self;
 
-        // Native AppCSXCAD is a light Qt application; match the palette so a
-        // side-by-side comparison is meaningful (fonts and widget metrics
-        // still differ until the Qt shell lands, RM-152).
-        let mut visuals = egui::Visuals::light();
-        visuals.panel_fill = egui::Color32::from_rgb(240, 240, 240);
-        ui.ctx().set_visuals(visuals);
-        // Approximate the native Qt widget metrics (row rhythm and font size).
-        ui.ctx().all_styles_mut(|style| {
-            style.spacing.button_padding = egui::vec2(6.0, 4.0);
-            style.spacing.item_spacing = egui::vec2(6.0, 4.0);
-            style.spacing.interact_size.y = 24.0;
-            style
-                .text_styles
-                .insert(egui::TextStyle::Body, egui::FontId::proportional(14.0));
-            style
-                .text_styles
-                .insert(egui::TextStyle::Button, egui::FontId::proportional(14.0));
-        });
+        // One palette, one spacing rhythm and one set of corner radii. The
+        // embedding application may change the theme this frame; it is read
+        // again after `extra_ui` for the chrome and the viewport clear colour.
+        theme::apply(ui.ctx(), theme::current(ui.ctx()));
 
         // Document-level undo/redo. The shortcut is ignored while a text
         // field has the keyboard, so egui's own text undo still applies there.
@@ -510,72 +515,182 @@ impl EguiApp {
             extra_ui(ui, document, gui_state);
         }
 
-        egui::Panel::bottom("status_bar").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label("X: -180  Y: -610");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if let Some(document) = document.as_ref() {
-                        ui.label(format!(
-                            "{} properties / {} primitives",
-                            document.structure().property_count(),
-                            document
-                                .structure()
-                                .all_primitives(false, csxcad_core::model::PropertyType::Any)
-                                .len()
-                        ));
-                    } else {
-                        ui.label("no structure loaded");
+        let palette = theme::palette(ui.ctx());
+        renderer.set_background(palette.viewport_rgb());
+
+        if gui_state.show_status_bar {
+            egui::Panel::bottom("status_bar")
+                .frame(chrome_frame(palette))
+                .show(ui, |ui| {
+                    let delta = document
+                        .as_ref()
+                        .map(|document| document.structure().grid().delta_unit())
+                        .unwrap_or(1.0);
+                    let unit = drawing_unit(delta);
+                    // World position of the cursor on the drawing plane (z = 0),
+                    // reported in drawing units like the native status bar.
+                    let cursor = ui
+                        .ctx()
+                        .pointer_latest_pos()
+                        .filter(|position| viewport_rect.contains(*position))
+                        .and_then(|position| {
+                            let width = viewport_rect.width().max(1.0);
+                            let height = viewport_rect.height().max(1.0);
+                            let ndc = [
+                                2.0 * (position.x - viewport_rect.left()) / width - 1.0,
+                                1.0 - 2.0 * (position.y - viewport_rect.top()) / height,
+                            ];
+                            let (origin, direction) = renderer.camera().ray(ndc, width / height);
+                            if direction[2].abs() < 1.0e-9 {
+                                return None;
+                            }
+                            let distance = -origin[2] / direction[2];
+                            if distance <= 0.0 {
+                                return None;
+                            }
+                            Some([
+                                (origin[0] + direction[0] * distance) as f64 / delta.max(1e-30),
+                                (origin[1] + direction[1] * distance) as f64 / delta.max(1e-30),
+                            ])
+                        });
+                    ui.horizontal(|ui| {
+                        let coordinates = match cursor {
+                            Some([x, y]) => format!("X {x:>9.3}   Y {y:>9.3}   {unit}"),
+                            None => format!("X      —     Y      —     {unit}"),
+                        };
+                        ui.label(
+                            egui::RichText::new(coordinates)
+                                .monospace()
+                                .color(palette.text_secondary),
+                        )
+                        .on_hover_text(format!("1 drawing unit = {delta:.6e} m"));
+                        ui.separator();
+                        ui.label(
+                            egui::RichText::new(gui_state.transform_mode.label())
+                                .color(palette.text_tertiary),
+                        )
+                        .on_hover_text("Active viewport tool");
+                        ui.separator();
+                        ui.label(
+                            egui::RichText::new(selection_summary(document.as_ref(), gui_state))
+                                .color(palette.text_secondary),
+                        );
+                        ui.with_layout(
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                let projection = if renderer.camera().orthographic {
+                                    "Parallel"
+                                } else {
+                                    "Perspective"
+                                };
+                                if let Some(document) = document.as_ref() {
+                                    if document.is_modified() {
+                                        ui.label(
+                                            egui::RichText::new("● Unsaved")
+                                                .color(palette.warning),
+                                        )
+                                        .on_hover_text("The project has unsaved changes");
+                                    }
+                                    let structure = document.structure();
+                                    let primitives = structure
+                                        .all_primitives(
+                                            false,
+                                            csxcad_core::model::PropertyType::Any,
+                                        )
+                                        .len();
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "{projection}  ·  {} props  ·  {} prims",
+                                            structure.property_count(),
+                                            primitives
+                                        ))
+                                        .color(palette.text_tertiary),
+                                    );
+                                } else {
+                                    ui.label(
+                                        egui::RichText::new(format!("{projection}  ·  no structure"))
+                                            .color(palette.text_tertiary),
+                                    );
+                                }
+                            },
+                        );
+                    });
+                });
+        }
+
+        if gui_state.show_structure_tree {
+            egui::Panel::left("structure_tree")
+                .default_size(320.0)
+                .min_size(240.0)
+                .max_size(380.0)
+                .frame(dock_frame(palette))
+                .show(ui, |ui| {
+                    ui.add_space(2.0);
+                    ui.label(
+                        egui::RichText::new("Structure")
+                            .size(14.0)
+                            .strong()
+                            .color(palette.text),
+                    );
+                    // The tree keeps its own scroll area; bound it so the grid
+                    // and parameter sections below stay reachable at 800 px.
+                    let tree_height = (ui.available_height() * 0.46).max(180.0);
+                    ui.allocate_ui(
+                        egui::vec2(ui.available_width(), tree_height),
+                        |ui| {
+                            if let Some(document) = document.as_mut() {
+                                tree_widget.show(ui, document, gui_state);
+                            }
+                        },
+                    );
+                    ui.separator();
+                    egui::ScrollArea::vertical()
+                        .id_salt("grid_and_parameters")
+                        .show(ui, |ui| {
+                            egui::CollapsingHeader::new("Rectilinear Grid")
+                                .default_open(true)
+                                .show(ui, |ui| {
+                                    if let Some(document) = document.as_mut() {
+                                        let _ = grid_editor.show_mesh(ui, document);
+                                    }
+                                });
+                            ui.separator();
+                            egui::CollapsingHeader::new("Parameter")
+                                .default_open(true)
+                                .show(ui, |ui| {
+                                    if let Some(document) = document.as_mut() {
+                                        let _ = grid_editor.show_parameters(ui, document);
+                                    }
+                                });
+                        });
+                });
+        }
+
+        if gui_state.show_inspector {
+            egui::Panel::right("editors")
+                .default_size(360.0)
+                .min_size(280.0)
+                .frame(dock_frame(palette))
+                .show(ui, |ui| {
+                    ui.add_space(2.0);
+                    ui.label(
+                        egui::RichText::new("Inspector")
+                            .size(14.0)
+                            .strong()
+                            .color(palette.text),
+                    );
+                    ui.separator();
+                    if let Some(document) = document.as_mut() {
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            let _ = property_editor.show(ui, document, gui_state);
+                            ui.separator();
+                            let _ = primitive_editor.show(ui, document, gui_state);
+                            ui.separator();
+                            transform_editor.show(ui, document, gui_state);
+                        });
                     }
                 });
-            });
-        });
-
-        egui::Panel::left("structure_tree")
-            .default_size(280.0)
-            .show(ui, |ui| {
-                ui.add_space(2.0);
-                ui.heading("Properties and Structures");
-                ui.horizontal(|ui| {
-                    ui.strong("Properties / Primitives");
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.strong("Vis");
-                    });
-                });
-                ui.separator();
-                if let Some(document) = document.as_mut() {
-                    tree_widget.show(ui, document, gui_state);
-                }
-                ui.separator();
-                egui::CollapsingHeader::new("Rectilinear Grid")
-                    .default_open(true)
-                    .show(ui, |ui| {
-                        if let Some(document) = document.as_mut() {
-                            let _ = grid_editor.show_mesh(ui, document);
-                        }
-                    });
-                ui.separator();
-                egui::CollapsingHeader::new("Parameter")
-                    .default_open(true)
-                    .show(ui, |ui| {
-                        if let Some(document) = document.as_mut() {
-                            let _ = grid_editor.show_parameters(ui, document);
-                        }
-                    });
-            });
-
-        egui::Panel::right("editors")
-            .default_size(340.0)
-            .show(ui, |ui| {
-                if let Some(document) = document.as_mut() {
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        let _ = property_editor.show(ui, document, gui_state);
-                        ui.separator();
-                        let _ = primitive_editor.show(ui, document, gui_state);
-                        ui.separator();
-                        transform_editor.show(ui, document, gui_state);
-                    });
-                }
-            });
+        }
         // The 3D structure is drawn by the wgpu pass underneath egui, so the
         // central panel must not paint an opaque background over it. It also
         // carries the picking surface and the axis gizmo.
@@ -583,8 +698,9 @@ impl EguiApp {
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
                 let rect = ui.max_rect();
+                *viewport_rect = rect;
                 let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
-                draw_axis_gizmo(ui, rect, renderer.camera());
+                draw_axis_gizmo(ui, rect, renderer.camera(), palette);
                 let camera = *renderer.camera();
                 let height = rect.height().max(1.0);
                 let aspect = rect.width() / height;
@@ -623,7 +739,7 @@ impl EguiApp {
                             trace_input(format!(
                                 "drag_start id={} mode={:?}",
                                 id.get(),
-                                self.transform_mode
+                                gui_state.transform_mode
                             ));
                         }
                     }
@@ -638,8 +754,8 @@ impl EguiApp {
                             return;
                         }
                         let rotate = ui.input(|input| input.modifiers.alt)
-                            || self.transform_mode == TransformMode::Rotate;
-                        let scale = self.transform_mode == TransformMode::Scale;
+                            || gui_state.transform_mode == TransformMode::Rotate;
+                        let scale = gui_state.transform_mode == TransformMode::Scale;
                         let world_per_point = if camera.orthographic {
                             camera.distance / height
                         } else {
@@ -705,6 +821,64 @@ impl EguiApp {
                         }
                     }
                 }
+                // Hover read-out: name the primitive under the cursor, like
+                // the native viewport tooltip, so a click is predictable.
+                if let (Some(position), Some(document)) =
+                    (ui.ctx().pointer_latest_pos(), document.as_ref())
+                {
+                    if rect.contains(position) && !response.dragged() {
+                        if let Some(id) =
+                            pick_primitive(renderer.camera(), document.structure(), rect, position)
+                        {
+                            if let Some(primitive) = document.structure().primitive(id) {
+                                let property = document
+                                    .structure()
+                                    .property_for_primitive(id)
+                                    .map(|property| property.name().to_string())
+                                    .unwrap_or_default();
+                                let label = if property.is_empty() {
+                                    format!("{:?} - ID: {}", primitive.primitive_type(), id.get())
+                                } else {
+                                    format!(
+                                        "{:?} - ID: {}   <   {}",
+                                        primitive.primitive_type(),
+                                        id.get(),
+                                        property
+                                    )
+                                };
+                                let galley = ui.painter().layout_no_wrap(
+                                    label,
+                                    egui::FontId::proportional(12.0),
+                                    palette.text,
+                                );
+                                let anchor = egui::pos2(
+                                    (position.x + 16.0).min(rect.right() - galley.size().x - 16.0),
+                                    (position.y + 18.0).min(rect.bottom() - 30.0),
+                                );
+                                let background = egui::Rect::from_min_size(
+                                    anchor - egui::vec2(7.0, 4.0),
+                                    galley.size() + egui::vec2(14.0, 8.0),
+                                );
+                                ui.painter().rect(
+                                    background,
+                                    egui::CornerRadius::same(theme::RADIUS_INPUT),
+                                    palette.panel_raised,
+                                    egui::Stroke::new(1.0, palette.border_strong),
+                                    egui::StrokeKind::Outside,
+                                );
+                                ui.painter().galley(anchor, galley, palette.text);
+                            }
+                        }
+                    }
+                }
+                // Navigation hint, muted in the lower right corner.
+                ui.painter().text(
+                    rect.right_bottom() - egui::vec2(12.0, 10.0),
+                    egui::Align2::RIGHT_BOTTOM,
+                    "Drag: move   ·   Alt+drag: rotate   ·   MMB drag: orbit   ·   Wheel: zoom",
+                    egui::FontId::proportional(11.5),
+                    palette.text_tertiary,
+                );
             });
 
     }
@@ -831,7 +1005,63 @@ impl EguiApp {
     /// Native axis view presets: 0 = XY, 1 = XZ, 2 = YZ, 3 = free 3D.
     pub fn set_view_dir(&mut self, dir: i32) {
         self.gui_state.view_dir = dir;
+        // The 2D presets are orthographic; the free 3D view is perspective.
+        self.gui_state.parallel_projection = dir != 3;
         self.renderer.set_view_dir(dir);
+    }
+
+    /// Frame all geometry (Fit All).
+    pub fn fit_all(&mut self) {
+        self.renderer.fit_all();
+        self.request_redraw();
+    }
+
+    /// Frame the selected primitives (Fit Selection). Falls back to Fit All
+    /// when nothing is selected or the selection has no usable bounds.
+    pub fn fit_selection(&mut self) {
+        let Some(document) = self.document.as_ref() else {
+            return;
+        };
+        let structure = document.structure();
+        let parameters = structure.parameters();
+        let mut bounds: Option<[f64; 6]> = None;
+        for id in self.gui_state.selection.primitives.iter().copied() {
+            let Some(primitive) = structure.primitive(id) else {
+                continue;
+            };
+            let Ok(bbox) = primitive.bounding_box(Some(parameters), false) else {
+                continue;
+            };
+            if !bbox.iter().all(|value| value.is_finite()) {
+                continue;
+            }
+            bounds = Some(match bounds {
+                None => bbox,
+                Some(current) => [
+                    current[0].min(bbox[0]),
+                    current[1].max(bbox[1]),
+                    current[2].min(bbox[2]),
+                    current[3].max(bbox[3]),
+                    current[4].min(bbox[4]),
+                    current[5].max(bbox[5]),
+                ],
+            });
+        }
+        match bounds {
+            Some(bounds) => self.renderer.camera_mut().fit(bounds),
+            None => self.renderer.fit_all(),
+        }
+        self.request_redraw();
+    }
+
+    /// Apply a theme (used at startup for the persisted preference).
+    pub fn set_theme(&mut self, mode: theme::ThemeMode) {
+        theme::set(&self.egui_ctx, mode);
+    }
+
+    /// The theme currently in use.
+    pub fn theme(&self) -> theme::ThemeMode {
+        theme::current(&self.egui_ctx)
     }
 
     /// Switch the viewport between parallel and perspective projection.
@@ -842,11 +1072,11 @@ impl EguiApp {
 
     /// Select the active viewport drag tool.
     pub fn set_transform_mode(&mut self, mode: TransformMode) {
-        self.transform_mode = mode;
+        self.gui_state.transform_mode = mode;
     }
 
     pub fn get_transform_mode(&self) -> TransformMode {
-        self.transform_mode
+        self.gui_state.transform_mode
     }
 }
 
@@ -981,16 +1211,106 @@ fn pick_primitive(
 }
 
 /// Native axis gizmo in the lower-left corner of the viewport.
-fn draw_axis_gizmo(ui: &egui::Ui, rect: egui::Rect, camera: &Camera) {
+/// Frame used by the menu, command strip and status bar.
+pub fn chrome_frame(palette: &theme::Palette) -> egui::Frame {
+    egui::Frame::new()
+        .fill(palette.chrome_bg)
+        .inner_margin(egui::Margin::symmetric(theme::PANEL_PADDING, 3))
+        .stroke(egui::Stroke::new(1.0, palette.border))
+}
+
+/// Frame used by the left and right docks.
+pub fn dock_frame(palette: &theme::Palette) -> egui::Frame {
+    egui::Frame::new()
+        .fill(palette.panel_bg)
+        .inner_margin(egui::Margin::symmetric(theme::PANEL_PADDING, 8))
+}
+
+/// Label for one drawing unit, where `delta` is its length in metres.
+fn drawing_unit(delta: f64) -> &'static str {
+    const UNITS: [(f64, &str); 9] = [
+        (1.0e-12, "pm"),
+        (1.0e-9, "nm"),
+        (1.0e-6, "µm"),
+        (1.0e-3, "mm"),
+        (1.0e-2, "cm"),
+        (1.0, "m"),
+        (1.0e3, "km"),
+        (1.0e6, "Mm"),
+        (1.0e9, "Gm"),
+    ];
+    for (scale, label) in UNITS {
+        if delta > 0.0 && (delta / scale - 1.0).abs() <= 1.0e-9 {
+            return label;
+        }
+    }
+    "units"
+}
+
+/// One-line selection summary for the status bar.
+fn selection_summary(document: Option<&Document>, gui_state: &GuiState) -> String {
+    let Some(document) = document else {
+        return "No structure loaded".to_owned();
+    };
+    let structure = document.structure();
+    let primitives = gui_state.selection.primitives.len();
+    let properties = gui_state.selection.properties.len();
+    let total = primitives + properties;
+    if total == 0 {
+        return "No selection".to_owned();
+    }
+    let label = gui_state
+        .selection
+        .primitives
+        .iter()
+        .copied()
+        .find_map(|id| {
+            let primitive = structure.primitive(id)?;
+            let property = structure
+                .property_for_primitive(id)
+                .map(|property| property.name().to_string())
+                .unwrap_or_default();
+            Some(if property.is_empty() {
+                format!("{:?} {}", primitive.primitive_type(), id.get())
+            } else {
+                format!("{:?} · {}", primitive.primitive_type(), property)
+            })
+        })
+        .or_else(|| {
+            gui_state
+                .selection
+                .properties
+                .iter()
+                .copied()
+                .find_map(|id| {
+                    structure
+                        .property(id)
+                        .map(|property| format!("{:?} · {}", property.property_type(), property.name()))
+                })
+        })
+        .unwrap_or_else(|| "Selection".to_owned());
+    if total > 1 {
+        format!("{label}  (+{} more)", total - 1)
+    } else {
+        label
+    }
+}
+
+fn draw_axis_gizmo(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    camera: &Camera,
+    palette: &theme::Palette,
+) {
     let aspect = rect.width() / rect.height().max(1.0);
     let Some(origin) = camera.project(camera.center, aspect) else {
         return;
     };
     let base = egui::pos2(rect.left() + 36.0, rect.bottom() - 36.0);
     let axes = [
-        ([1.0, 0.0, 0.0], egui::Color32::from_rgb(200, 40, 40), "X"),
-        ([0.0, 1.0, 0.0], egui::Color32::from_rgb(40, 160, 40), "Y"),
-        ([0.0, 0.0, 1.0], egui::Color32::from_rgb(40, 80, 200), "Z"),
+        ([1.0, 0.0, 0.0], palette.axis_x, "X"),
+        ([0.0, 1.0, 0.0], palette.axis_y, "Y"),
+        ([0.0, 0.0, 1.0], palette.axis_z, "Z"),
     ];
     for (direction, color, label) in axes {
         let point = [
@@ -1055,6 +1375,43 @@ mod pick_tests {
 }
 
 #[cfg(test)]
+mod status_tests {
+    use super::*;
+
+    #[test]
+    fn drawing_units_map_to_si_labels() {
+        assert_eq!(drawing_unit(1.0e-3), "mm");
+        assert_eq!(drawing_unit(1.0e-6), "µm");
+        assert_eq!(drawing_unit(1.0e-9), "nm");
+        assert_eq!(drawing_unit(1.0), "m");
+        // A unit that is not an SI prefix is reported honestly, not guessed.
+        assert_eq!(drawing_unit(2.5e-3), "units");
+        assert_eq!(drawing_unit(0.0), "units");
+    }
+
+    #[test]
+    fn an_empty_selection_is_reported() {
+        let document = Document::from_structure(Structure::new());
+        assert_eq!(
+            selection_summary(Some(&document), &GuiState::default()),
+            "No selection"
+        );
+        assert_eq!(selection_summary(None, &GuiState::default()), "No structure loaded");
+    }
+
+    #[test]
+    fn theme_switching_is_visible_to_later_frames() {
+        let ctx = egui::Context::default();
+        assert_eq!(theme::current(&ctx), theme::ThemeMode::Dark);
+        theme::set(&ctx, theme::ThemeMode::Light);
+        assert_eq!(theme::current(&ctx), theme::ThemeMode::Light);
+        let palette = theme::palette(&ctx);
+        assert!(!palette.is_dark);
+        assert_eq!(palette.viewport_bg, theme::LIGHT.viewport_bg);
+    }
+}
+
+#[cfg(test)]
 mod navigation_tests {
     use super::*;
     use winit::dpi::PhysicalPosition;
@@ -1062,9 +1419,17 @@ mod navigation_tests {
         ElementState, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent,
     };
 
+    /// Put the pointer over the middle of the viewport, as a frame would.
+    fn pointer_in_viewport(app: &mut EguiApp) {
+        app.viewport_rect =
+            egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        app.last_pointer = Some(egui::pos2(400.0, 300.0));
+    }
+
     #[test]
     fn wheel_zooms_and_middle_drag_orbits() {
         let mut app = EguiApp::new();
+        pointer_in_viewport(&mut app);
         let distance = app.renderer.camera().distance;
         app.handle_navigation(&WindowEvent::MouseWheel {
             device_id: winit::event::DeviceId::dummy(),
@@ -1099,6 +1464,40 @@ mod navigation_tests {
             state: ElementState::Released,
             button: MouseButton::Middle,
         });
+    }
+
+    #[test]
+    fn navigation_outside_the_viewport_is_ignored() {
+        let mut app = EguiApp::new();
+        app.viewport_rect =
+            egui::Rect::from_min_size(egui::pos2(100.0, 100.0), egui::vec2(800.0, 600.0));
+        // Over the left dock, not the viewport.
+        app.last_pointer = Some(egui::pos2(40.0, 300.0));
+        let distance = app.renderer.camera().distance;
+        let yaw = app.renderer.camera().yaw;
+        app.handle_navigation(&WindowEvent::MouseWheel {
+            device_id: winit::event::DeviceId::dummy(),
+            delta: MouseScrollDelta::LineDelta(0.0, 1.0),
+            phase: TouchPhase::Moved,
+        });
+        assert_eq!(
+            app.renderer.camera().distance,
+            distance,
+            "a wheel event over the tree must not zoom the 3D view"
+        );
+        app.handle_navigation(&WindowEvent::MouseInput {
+            device_id: winit::event::DeviceId::dummy(),
+            state: ElementState::Pressed,
+            button: MouseButton::Middle,
+        });
+        app.handle_navigation(&WindowEvent::CursorMoved {
+            device_id: winit::event::DeviceId::dummy(),
+            position: PhysicalPosition::new(300.0, 300.0),
+        });
+        assert!(
+            (app.renderer.camera().yaw - yaw).abs() < 1.0e-6,
+            "a middle drag over a dock must not orbit"
+        );
     }
 
     #[test]

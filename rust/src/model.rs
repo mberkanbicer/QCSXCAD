@@ -48,7 +48,7 @@ impl Selection {
 }
 
 /// Overall GUI state: view mode, simulation mode, selection, visibility.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct GuiState {
     pub view_mode: ViewMode,
     pub sim_mode: SimMode,
@@ -57,6 +57,30 @@ pub struct GuiState {
     pub parallel_projection: bool,
     pub view_dir: i32,
     pub modified: bool,
+    /// Presentation-only panel visibility (never serialized into a project).
+    pub show_structure_tree: bool,
+    pub show_inspector: bool,
+    pub show_status_bar: bool,
+    /// Active viewport drag tool.
+    pub transform_mode: crate::widgets::TransformMode,
+}
+
+impl Default for GuiState {
+    fn default() -> Self {
+        Self {
+            view_mode: ViewMode::default(),
+            sim_mode: SimMode::default(),
+            selection: Selection::default(),
+            render_disc_models: false,
+            parallel_projection: false,
+            view_dir: 3,
+            modified: false,
+            show_structure_tree: true,
+            show_inspector: true,
+            show_status_bar: true,
+            transform_mode: crate::widgets::TransformMode::Move,
+        }
+    }
 }
 
 impl GuiState {

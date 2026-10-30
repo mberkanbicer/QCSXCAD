@@ -5,9 +5,11 @@
 
 pub mod app;
 pub mod renderer;
+pub mod theme;
 pub mod widgets;
 
-pub use app::{trace_input, EguiApp, TransformMode};
+pub use app::{trace_input, EguiApp};
+pub use qcsxcad_core::widgets::TransformMode;
 pub use renderer::WgpuRenderer;
 pub use widgets::{
     EguiGridEditor, EguiPrimitiveEditor, EguiPropertyEditor, EguiTreeWidget,
