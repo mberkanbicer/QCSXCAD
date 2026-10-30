@@ -11,6 +11,25 @@ use qcsxcad_core::rendering::StructureRenderer;
 use qcsxcad_core::tessellate::Tessellator;
 use wgpu::util::DeviceExt;
 
+/// Convert an sRGB colour to the linear space the sRGB swapchain expects.
+///
+/// Alpha is linear by definition and is passed through unchanged.
+fn srgb_to_linear(color: [f32; 4]) -> [f32; 4] {
+    fn channel(value: f32) -> f32 {
+        if value <= 0.040_45 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    }
+    [
+        channel(color[0]),
+        channel(color[1]),
+        channel(color[2]),
+        color[3],
+    ]
+}
+
 /// A 3D vertex: position + color.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -523,11 +542,16 @@ impl WgpuRenderer {
             render_discrete: self.render_discrete_models,
         };
         for primitive in tessellator.tessellate(structure) {
+            // Property colours are stored as sRGB bytes (the native format).
+            // The surface is an sRGB target, so the shader must receive linear
+            // values or every material renders lighter than native.
+            let fill = srgb_to_linear(primitive.fill_color);
+            let edge = srgb_to_linear(primitive.edge_color);
             for triangle in &primitive.mesh.triangles {
                 for vertex in triangle {
                     self.triangle_vertices.push(Vertex {
                         position: [vertex[0] as f32, vertex[1] as f32, vertex[2] as f32],
-                        color: primitive.fill_color,
+                        color: fill,
                     });
                 }
             }
@@ -535,7 +559,7 @@ impl WgpuRenderer {
                 for vertex in line {
                     self.line_vertices.push(Vertex {
                         position: [vertex[0] as f32, vertex[1] as f32, vertex[2] as f32],
-                        color: primitive.edge_color,
+                        color: edge,
                     });
                 }
             }
@@ -1020,6 +1044,24 @@ mod tests {
         assert!((renderer.camera.center[0] - 0.5).abs() < 1e-6);
         assert!((renderer.camera.center[1] - 1.0).abs() < 1e-6);
         assert!((renderer.camera.center[2] - 1.5).abs() < 1e-6);
+    }
+}
+
+#[cfg(test)]
+mod colour_tests {
+    use super::srgb_to_linear;
+
+    #[test]
+    fn stored_srgb_colours_are_linearised_for_the_surface() {
+        let linear = srgb_to_linear([0.5, 0.5, 0.5, 1.0]);
+        assert!(
+            (linear[0] - 0.214_041).abs() < 1.0e-4,
+            "mid grey: {}",
+            linear[0]
+        );
+        assert_eq!(linear[3], 1.0, "alpha is linear");
+        let black = srgb_to_linear([0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(black, [0.0, 0.0, 0.0, 1.0]);
     }
 }
 
