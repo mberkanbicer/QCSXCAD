@@ -46,6 +46,9 @@ pub struct EguiApp {
     viewport_rect: egui::Rect,
     /// Last pointer position in egui points (navigation gating).
     last_pointer: Option<egui::Pos2>,
+    /// Persisted dock widths (logical points).
+    dock_tree_width: f32,
+    dock_inspector_width: f32,
     last_cursor: Option<(f64, f64)>,
 }
 
@@ -75,6 +78,8 @@ impl EguiApp {
             orbiting: false,
             viewport_rect: egui::Rect::NOTHING,
             last_pointer: None,
+            dock_tree_width: 320.0,
+            dock_inspector_width: 360.0,
             last_cursor: None,
         }
     }
@@ -480,6 +485,8 @@ impl EguiApp {
             transform_editor,
             renderer,
             viewport_rect,
+            dock_tree_width,
+            dock_inspector_width,
             ..
         } = self;
 
@@ -619,8 +626,8 @@ impl EguiApp {
         }
 
         if gui_state.show_structure_tree {
-            egui::Panel::left("structure_tree")
-                .default_size(320.0)
+            let response = egui::Panel::left("structure_tree")
+                .default_size(*dock_tree_width)
                 .min_size(240.0)
                 .max_size(380.0)
                 .frame(dock_frame(palette))
@@ -664,11 +671,12 @@ impl EguiApp {
                                 });
                         });
                 });
+            *dock_tree_width = response.response.rect.width();
         }
 
         if gui_state.show_inspector {
-            egui::Panel::right("editors")
-                .default_size(360.0)
+            let response = egui::Panel::right("editors")
+                .default_size(*dock_inspector_width)
                 .min_size(280.0)
                 .frame(dock_frame(palette))
                 .show(ui, |ui| {
@@ -690,6 +698,7 @@ impl EguiApp {
                         });
                     }
                 });
+            *dock_inspector_width = response.response.rect.width();
         }
         // The 3D structure is drawn by the wgpu pass underneath egui, so the
         // central panel must not paint an opaque background over it. It also
@@ -1054,6 +1063,17 @@ impl EguiApp {
         self.request_redraw();
     }
 
+    /// Apply persisted dock widths before the first frame.
+    pub fn set_dock_widths(&mut self, tree: f32, inspector: f32) {
+        self.dock_tree_width = tree.clamp(240.0, 380.0);
+        self.dock_inspector_width = inspector.clamp(280.0, 640.0);
+    }
+
+    /// The dock widths last used by the layout.
+    pub fn dock_widths(&self) -> (f32, f32) {
+        (self.dock_tree_width, self.dock_inspector_width)
+    }
+
     /// Apply a theme (used at startup for the persisted preference).
     pub fn set_theme(&mut self, mode: theme::ThemeMode) {
         theme::set(&self.egui_ctx, mode);
@@ -1371,6 +1391,21 @@ mod pick_tests {
             pick_primitive(&camera, &structure, rect, egui::pos2(5.0, 5.0)),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod dock_tests {
+    use super::*;
+
+    #[test]
+    fn dock_widths_have_defaults_and_are_clamped() {
+        let mut app = EguiApp::new();
+        assert_eq!(app.dock_widths(), (320.0, 360.0));
+        app.set_dock_widths(100.0, 900.0);
+        assert_eq!(app.dock_widths(), (240.0, 640.0));
+        app.set_dock_widths(300.0, 400.0);
+        assert_eq!(app.dock_widths(), (300.0, 400.0));
     }
 }
 
