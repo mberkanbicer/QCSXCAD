@@ -23,7 +23,9 @@ pub type Triangle = [Vertex; 3];
 pub type Line = [Vertex; 2];
 
 const DEFAULT_FILL: [f32; 4] = [0.45, 0.62, 0.90, 0.55];
-const DEFAULT_EDGE: [f32; 4] = [0.12, 0.18, 0.32, 1.0];
+// Native CSXCAD: a property's edge colour defaults to black, so edges
+// stand out against its fill colour.
+const DEFAULT_EDGE: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 
 fn color_to_rgba(color: PropertyColor) -> [f32; 4] {
     let [red, green, blue, alpha] = color.components();
