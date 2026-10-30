@@ -16,98 +16,34 @@ use crate::tessellate::{Mesh, PrimitiveMesh, Vertex};
 const DISCRETE_FILL: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 const DISCRETE_EDGE: [f32; 4] = [0.35, 0.35, 0.35, 1.0];
 
-/// Cell index of the discrete grid (native `m_Disc_Ind` layout).
-fn cell_index(size: [usize; 3], position: [usize; 3]) -> usize {
-    position[0] + position[1] * (size[0] - 1) + position[2] * (size[0] - 1) * (size[1] - 1)
-}
-
 /// Build the material/background boundary surface of a discrete-material grid.
 ///
 /// `scale` is the property scale (native `CSPropDiscMaterial::GetScale`); the
-/// coordinates are the grid node coordinates multiplied by it.
+/// coordinates are the grid node coordinates multiplied by it. The extraction
+/// itself is `DiscreteMaterialGrid::surface_poly_data`, the same routine the
+/// Python and VTK front ends use.
 pub fn surface_mesh(grid: &DiscreteMaterialGrid, scale: f64) -> Mesh {
-    let size = grid.size();
-    let indices = grid.material_indices();
-    let mesh_axes = grid.mesh();
     let mut mesh = Mesh::default();
-    if size.contains(&0) || size[0] < 2 || size[1] < 2 || size[2] < 2 {
+    let Some(surface) = grid.surface_poly_data() else {
         return mesh;
-    }
-    let expected = (size[0] - 1) * (size[1] - 1) * (size[2] - 1);
-    if indices.len() < expected {
-        return mesh;
-    }
-
-    let axis_steps = [[1usize, 0, 0], [0, 1, 0], [0, 0, 1]];
-    let point = |position: [usize; 3]| -> Vertex {
-        [
-            f64::from(mesh_axes[0][position[0]]) * scale,
-            f64::from(mesh_axes[1][position[1]]) * scale,
-            f64::from(mesh_axes[2][position[2]]) * scale,
-        ]
     };
-
-    for pos_z in 0..size[2] {
-        for pos_x in 0..size[0] {
-            for pos_y in 0..size[1] {
-                let pos = [pos_x, pos_y, pos_z];
-                for axis in 0..3 {
-                    let next = (axis + 1) % 3;
-                    let next_next = (axis + 2) % 3;
-                    if pos[next] >= size[next] - 1 || pos[next_next] >= size[next_next] - 1 {
-                        continue;
-                    }
-                    let material_above = if pos[axis] < size[axis] - 1 {
-                        indices[cell_index(size, pos)]
-                    } else {
-                        0
-                    };
-                    let material_below = if pos[axis] > 0 {
-                        let mut relative = pos;
-                        relative[axis] -= 1;
-                        indices[cell_index(size, relative)]
-                    } else {
-                        0
-                    };
-                    if (material_above > 0) == (material_below > 0) {
-                        continue;
-                    }
-
-                    // corners: base node, then one step in `next`, then in
-                    // both, then back; the order flips with the material side
-                    let step_next = axis_steps[next];
-                    let step_next_next = axis_steps[next_next];
-                    let corner = |a: usize, b: usize| -> [usize; 3] {
-                        [
-                            pos[0] + step_next[0] * a + step_next_next[0] * b,
-                            pos[1] + step_next[1] * a + step_next_next[1] * b,
-                            pos[2] + step_next[2] * a + step_next_next[2] * b,
-                        ]
-                    };
-                    let (first, second) = if material_above > 0 && material_below == 0 {
-                        (corner(1, 0), corner(1, 1))
-                    } else {
-                        (corner(0, 1), corner(1, 1))
-                    };
-                    let base = point(pos);
-                    let a = point(first);
-                    let b = point(second);
-                    let d = point(corner(0, 0));
-                    if material_above > 0 && material_below == 0 {
-                        // up: base -> +next -> +next+next_next -> +next_next
-                        mesh.triangles.push([base, a, b]);
-                        mesh.triangles.push([base, b, d]);
-                    } else {
-                        // down: base -> +next_next -> +next_next+next -> +next
-                        mesh.triangles.push([base, d, b]);
-                        mesh.triangles.push([base, b, a]);
-                    }
-                    mesh.lines.push([base, d]);
-                    mesh.lines.push([d, b]);
-                    mesh.lines.push([b, a]);
-                    mesh.lines.push([a, base]);
-                }
-            }
+    let point = |index: u32| -> Vertex {
+        let point = surface.points[index as usize];
+        [point[0] * scale, point[1] * scale, point[2] * scale]
+    };
+    for quad in &surface.quads {
+        let corners = [
+            point(quad[0]),
+            point(quad[1]),
+            point(quad[2]),
+            point(quad[3]),
+        ];
+        // The quad order is the native one; two triangles keep its winding.
+        mesh.triangles.push([corners[0], corners[1], corners[2]]);
+        mesh.triangles.push([corners[0], corners[2], corners[3]]);
+        for corner in 0..4 {
+            mesh.lines
+                .push([corners[corner], corners[(corner + 1) % 4]]);
         }
     }
     mesh
