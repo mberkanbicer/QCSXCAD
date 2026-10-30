@@ -61,6 +61,18 @@ fn drag(ui: &mut egui::Ui, label: &str, value: &mut f64, speed: f64) -> bool {
     .changed()
 }
 
+/// Move a row index by `delta`, clamped to the visible rows.
+fn move_selection(length: usize, current: Option<usize>, delta: isize) -> Option<usize> {
+    if length == 0 {
+        return None;
+    }
+    match current {
+        Some(index) => Some((index as isize + delta).clamp(0, length as isize - 1) as usize),
+        None if delta >= 0 => Some(0),
+        None => Some(length - 1),
+    }
+}
+
 /// egui-based structure/property tree widget.
 pub struct EguiTreeWidget {
     /// Expanded property IDs in the tree.
@@ -70,6 +82,8 @@ pub struct EguiTreeWidget {
     /// Item waiting for the delete confirmation.
     pending_delete: Option<TreeItem>,
     last_error: Option<String>,
+    /// Draw the keyboard focus ring on the selected row.
+    keyboard_focus: bool,
 }
 
 impl Default for EguiTreeWidget {
@@ -79,6 +93,7 @@ impl Default for EguiTreeWidget {
             selection: Selection::new(),
             pending_delete: None,
             last_error: None,
+            keyboard_focus: false,
         }
     }
 }
@@ -190,11 +205,47 @@ impl EguiTreeWidget {
         let mut request_delete = None;
         let mut set_visibility = None;
         let palette = theme::palette(ui.ctx());
+        // Keyboard navigation works whenever no text field owns the keyboard.
+        // Up/Down move through the visible rows, Left/Right collapse/expand a
+        // property. The focus ring is drawn on the selected row.
+        let rows = tree_rows(document.structure(), |id| self.expanded.contains(&id));
+        let current = rows.iter().position(|row| match row.item {
+            TreeItem::Property(id) => self.selection.properties.contains(&id),
+            TreeItem::Primitive(id) => self.selection.primitives.contains(&id),
+        });
+        if !ui.ctx().egui_wants_keyboard_input() {
+            let (down, up, left, right) = ui.input(|input| {
+                (
+                    input.key_pressed(egui::Key::ArrowDown),
+                    input.key_pressed(egui::Key::ArrowUp),
+                    input.key_pressed(egui::Key::ArrowLeft),
+                    input.key_pressed(egui::Key::ArrowRight),
+                )
+            });
+            if down || up {
+                let delta = if down { 1 } else { -1 };
+                if let Some(index) = move_selection(rows.len(), current, delta) {
+                    if let Some(row) = rows.get(index) {
+                        select_item = Some(row.item);
+                        self.keyboard_focus = true;
+                    }
+                }
+            }
+            if let Some(TreeItem::Property(id)) =
+                current.and_then(|index| rows.get(index)).map(|row| row.item)
+            {
+                if left {
+                    self.expanded.remove(&id);
+                }
+                if right {
+                    self.expanded.insert(id);
+                }
+            }
+        }
 
         egui::ScrollArea::vertical()
             .id_salt("structure_tree_rows")
             .show(ui, |ui| {
-                let rows = tree_rows(document.structure(), |id| self.expanded.contains(&id));
                 for row in rows {
                     let selected = match row.item {
                         TreeItem::Property(id) => self.selection.properties.contains(&id),
@@ -217,6 +268,14 @@ impl EguiTreeWidget {
                             egui::CornerRadius::ZERO,
                             palette.accent,
                         );
+                        if self.keyboard_focus {
+                            painter.rect_stroke(
+                                rect.shrink(0.5),
+                                egui::CornerRadius::same(theme::RADIUS_INPUT),
+                                egui::Stroke::new(1.0, palette.focus),
+                                egui::StrokeKind::Inside,
+                            );
+                        }
                     } else if response.hovered() {
                         painter.rect_filled(
                             rect,
@@ -277,6 +336,7 @@ impl EguiTreeWidget {
 
                     if response.clicked() {
                         select_item = Some(row.item);
+                        self.keyboard_focus = true;
                     }
                     if response.double_clicked() {
                         if let TreeItem::Property(id) = row.item {
@@ -2029,5 +2089,21 @@ mod tests {
         }
         run_frame(&mut document, &mut state);
         assert_eq!(document.structure().primitive_count(), 12);
+    }
+}
+
+
+#[cfg(test)]
+mod tree_navigation_tests {
+    use super::move_selection;
+
+    #[test]
+    fn keyboard_navigation_is_clamped_to_the_visible_rows() {
+        assert_eq!(move_selection(5, Some(2), 1), Some(3));
+        assert_eq!(move_selection(5, Some(4), 1), Some(4));
+        assert_eq!(move_selection(5, Some(0), -1), Some(0));
+        assert_eq!(move_selection(5, None, 1), Some(0));
+        assert_eq!(move_selection(5, None, -1), Some(4));
+        assert_eq!(move_selection(0, None, 1), None);
     }
 }
