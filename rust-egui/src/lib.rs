@@ -4,6 +4,8 @@
 //! rendering traits using egui for the UI and wgpu for 3D rendering.
 
 pub mod app;
+#[cfg(feature = "docking")]
+pub mod docking;
 pub mod renderer;
 pub mod theme;
 pub mod widgets;

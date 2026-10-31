@@ -49,6 +49,9 @@ pub struct EguiApp {
     /// Persisted dock widths (logical points).
     dock_tree_width: f32,
     dock_inspector_width: f32,
+    /// Drag-docking layout (ADR 0010); only with the `docking` feature.
+    #[cfg(feature = "docking")]
+    dock_layout: crate::docking::DockLayout,
     last_cursor: Option<(f64, f64)>,
 }
 
@@ -80,6 +83,8 @@ impl EguiApp {
             last_pointer: None,
             dock_tree_width: 320.0,
             dock_inspector_width: 360.0,
+            #[cfg(feature = "docking")]
+            dock_layout: crate::docking::DockLayout::default(),
             last_cursor: None,
         }
     }
@@ -469,6 +474,282 @@ impl EguiApp {
         Ok(())
     }
 
+
+fn structure_pane_ui(
+    ui: &mut egui::Ui,
+    document: &mut Option<Document>,
+    gui_state: &mut GuiState,
+    tree_widget: &mut EguiTreeWidget,
+    grid_editor: &mut EguiGridEditor,
+    palette: &theme::Palette,
+) {
+
+    ui.add_space(2.0);
+    ui.label(
+        egui::RichText::new("Structure")
+            .size(14.0)
+            .strong()
+            .color(palette.text),
+    );
+    // The tree keeps its own scroll area; bound it so the grid
+    // and parameter sections below stay reachable at 800 px.
+    let tree_height = (ui.available_height() * 0.46).max(180.0);
+    ui.allocate_ui(
+        egui::vec2(ui.available_width(), tree_height),
+        |ui| {
+            if let Some(document) = document.as_mut() {
+                tree_widget.show(ui, document, gui_state);
+            }
+        },
+    );
+    ui.separator();
+    egui::ScrollArea::vertical()
+        .id_salt("grid_and_parameters")
+        .show(ui, |ui| {
+            egui::CollapsingHeader::new("Rectilinear Grid")
+                .default_open(true)
+                .show(ui, |ui| {
+                    if let Some(document) = document.as_mut() {
+                        let _ = grid_editor.show_mesh(ui, document);
+                    }
+                });
+            ui.separator();
+            egui::CollapsingHeader::new("Parameter")
+                .default_open(true)
+                .show(ui, |ui| {
+                    if let Some(document) = document.as_mut() {
+                        let _ = grid_editor.show_parameters(ui, document);
+                    }
+                });
+        });
+
+}
+
+fn inspector_pane_ui(
+    ui: &mut egui::Ui,
+    document: &mut Option<Document>,
+    gui_state: &mut GuiState,
+    property_editor: &mut EguiPropertyEditor,
+    primitive_editor: &mut EguiPrimitiveEditor,
+    transform_editor: &mut EguiTransformEditor,
+    palette: &theme::Palette,
+) {
+
+    ui.add_space(2.0);
+    ui.label(
+        egui::RichText::new("Inspector")
+            .size(14.0)
+            .strong()
+            .color(palette.text),
+    );
+    ui.separator();
+    if let Some(document) = document.as_mut() {
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            let _ = property_editor.show(ui, document, gui_state);
+            ui.separator();
+            let _ = primitive_editor.show(ui, document, gui_state);
+            ui.separator();
+            transform_editor.show(ui, document, gui_state);
+        });
+    }
+
+}
+
+fn viewport_pane_ui(
+    ui: &mut egui::Ui,
+    document: &mut Option<Document>,
+    gui_state: &mut GuiState,
+    tree_widget: &mut EguiTreeWidget,
+    renderer: &WgpuRenderer,
+    viewport_rect: &mut egui::Rect,
+    palette: &theme::Palette,
+) {
+
+    let rect = ui.max_rect();
+    *viewport_rect = rect;
+    let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
+    draw_axis_gizmo(ui, rect, renderer.camera(), palette);
+    let camera = *renderer.camera();
+    let height = rect.height().max(1.0);
+    let aspect = rect.width() / height;
+    // Drag the primitive under the pointer. If nothing is selected
+    // the press picks the primitive first, so a single gesture
+    // selects and moves it.
+    if response.drag_started() {
+        if let (Some(position), Some(document)) =
+            (response.interact_pointer_pos(), document.as_ref())
+        {
+            if gui_state.selection.primitives.is_empty() {
+                if let Some(id) = pick_primitive(
+                    renderer.camera(),
+                    document.structure(),
+                    rect,
+                    position,
+                ) {
+                    trace_input(format!(
+                        "pick id={} at=({:.0},{:.0})",
+                        id.get(),
+                        position.x,
+                        position.y
+                    ));
+                    let mut selection = Selection::new();
+                    selection.primitives.insert(id);
+                    gui_state.selection = selection.clone();
+                    tree_widget.set_selection(selection);
+                }
+            }
+        }
+        if !gui_state.selection.primitives.is_empty() {
+            if let Some(document) = document.as_mut() {
+                document.begin_gesture();
+            }
+            if let Some(id) = gui_state.selection.primitives.iter().copied().next() {
+                trace_input(format!(
+                    "drag_start id={} mode={:?}",
+                    id.get(),
+                    gui_state.transform_mode
+                ));
+            }
+        }
+    }
+    if response.dragged() {
+        if let Some(id) = gui_state.selection.primitives.iter().copied().next() {
+            // Per-frame pointer movement: `drag_delta` is the whole
+            // gesture and would compound every frame.
+            let delta = ui.input(|input| input.pointer.delta());
+            if delta == egui::Vec2::ZERO {
+                // Nothing moved this frame; skip the model edit.
+                return;
+            }
+            let rotate = ui.input(|input| input.modifiers.alt)
+                || gui_state.transform_mode == TransformMode::Rotate;
+            let scale = gui_state.transform_mode == TransformMode::Scale;
+            let world_per_point = if camera.orthographic {
+                camera.distance / height
+            } else {
+                2.0 * camera.distance * (22.5f32.to_radians()).tan() / height
+            };
+            let (sin_yaw, cos_yaw) = camera.yaw.sin_cos();
+            let right = [-sin_yaw, cos_yaw, 0.0];
+            let (sin_pitch, cos_pitch) = camera.pitch.sin_cos();
+            let forward = [-cos_pitch * cos_yaw, -cos_pitch * sin_yaw, -sin_pitch];
+            let up = [
+                right[1] * forward[2] - right[2] * forward[1],
+                right[2] * forward[0] - right[0] * forward[2],
+                right[0] * forward[1] - right[1] * forward[0],
+            ];
+            let world = [
+                (right[0] * delta.x - up[0] * delta.y) * world_per_point,
+                (right[1] * delta.x - up[1] * delta.y) * world_per_point,
+                (right[2] * delta.x - up[2] * delta.y) * world_per_point,
+            ];
+            if let Some(document) = document.as_mut() {
+                if scale {
+                    let factor =
+                        (1.0 + delta.x as f64 * 0.01).clamp(0.1, 10.0);
+                    let _ = document.scale_primitive_by(id, factor);
+                    trace_input(format!("scale id={} factor={factor:.5}", id.get()));
+                } else if rotate {
+                    // Alt-drag or the Rotate tool rotates around z.
+                    let angle = delta.x as f64 * 0.01;
+                    let _ = document.rotate_primitive_by(id, [0.0, 0.0, 1.0], angle);
+                    trace_input(format!(
+                        "rotate id={} angle_rad={angle:.5}",
+                        id.get()
+                    ));
+                } else {
+                    let _ = document.move_primitive_by(
+                        id,
+                        [world[0] as f64, world[1] as f64, world[2] as f64],
+                    );
+                    trace_input(format!(
+                        "move id={} dx={:.5e} dy={:.5e} dz={:.5e}",
+                        id.get(),
+                        world[0],
+                        world[1],
+                        world[2]
+                    ));
+                }
+            }
+        }
+    }
+    let _ = aspect;
+    if response.clicked() {
+        if let (Some(position), Some(document)) =
+            (response.interact_pointer_pos(), document.as_ref())
+        {
+            if let Some(id) =
+                pick_primitive(renderer.camera(), document.structure(), rect, position)
+            {
+                trace_input(format!("pick id={} at=({:.0},{:.0})", id.get(), position.x, position.y));
+                let mut selection = Selection::new();
+                selection.primitives.insert(id);
+                gui_state.selection = selection.clone();
+                tree_widget.set_selection(selection);
+            }
+        }
+    }
+    // Hover read-out: name the primitive under the cursor, like
+    // the native viewport tooltip, so a click is predictable.
+    if let (Some(position), Some(document)) =
+        (ui.ctx().pointer_latest_pos(), document.as_ref())
+    {
+        if rect.contains(position) && !response.dragged() {
+            if let Some(id) =
+                pick_primitive(renderer.camera(), document.structure(), rect, position)
+            {
+                if let Some(primitive) = document.structure().primitive(id) {
+                    let property = document
+                        .structure()
+                        .property_for_primitive(id)
+                        .map(|property| property.name().to_string())
+                        .unwrap_or_default();
+                    let label = if property.is_empty() {
+                        format!("{:?} - ID: {}", primitive.primitive_type(), id.get())
+                    } else {
+                        format!(
+                            "{:?} - ID: {}   <   {}",
+                            primitive.primitive_type(),
+                            id.get(),
+                            property
+                        )
+                    };
+                    let galley = ui.painter().layout_no_wrap(
+                        label,
+                        egui::FontId::proportional(12.0),
+                        palette.text,
+                    );
+                    let anchor = egui::pos2(
+                        (position.x + 16.0).min(rect.right() - galley.size().x - 16.0),
+                        (position.y + 18.0).min(rect.bottom() - 30.0),
+                    );
+                    let background = egui::Rect::from_min_size(
+                        anchor - egui::vec2(7.0, 4.0),
+                        galley.size() + egui::vec2(14.0, 8.0),
+                    );
+                    ui.painter().rect(
+                        background,
+                        egui::CornerRadius::same(theme::RADIUS_INPUT),
+                        palette.panel_raised,
+                        egui::Stroke::new(1.0, palette.border_strong),
+                        egui::StrokeKind::Outside,
+                    );
+                    ui.painter().galley(anchor, galley, palette.text);
+                }
+            }
+        }
+    }
+    // Navigation hint, muted in the lower right corner.
+    ui.painter().text(
+        rect.right_bottom() - egui::vec2(12.0, 10.0),
+        egui::Align2::RIGHT_BOTTOM,
+        "Drag: move   ·   Alt+drag: rotate   ·   MMB drag: orbit   ·   Wheel: zoom",
+        egui::FontId::proportional(11.5),
+        palette.text_tertiary,
+    );
+
+}
+
     /// Build the egui UI for one frame.
     fn build_ui(
         &mut self,
@@ -625,6 +906,49 @@ impl EguiApp {
                 });
         }
 
+        #[cfg(feature = "docking")]
+        {
+            use crate::docking::DockPane;
+            let mut layout = std::mem::take(&mut self.dock_layout);
+            layout.set_visible(DockPane::Structure, gui_state.show_structure_tree);
+            layout.set_visible(DockPane::Inspector, gui_state.show_inspector);
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE)
+                .show(ui, |ui| {
+                    layout.ui(ui, &mut |pane, ui| match pane {
+                        DockPane::Structure => Self::structure_pane_ui(
+                            ui,
+                            document,
+                            gui_state,
+                            tree_widget,
+                            grid_editor,
+                            &palette,
+                        ),
+                        DockPane::Inspector => Self::inspector_pane_ui(
+                            ui,
+                            document,
+                            gui_state,
+                            property_editor,
+                            primitive_editor,
+                            transform_editor,
+                            &palette,
+                        ),
+                        DockPane::Viewport => Self::viewport_pane_ui(
+                            ui,
+                            document,
+                            gui_state,
+                            tree_widget,
+                            renderer,
+                            viewport_rect,
+                            &palette,
+                        ),
+                    });
+                });
+            self.dock_layout = layout;
+        }
+
+        #[cfg(not(feature = "docking"))]
+        {
         if gui_state.show_structure_tree {
             let response = egui::Panel::left("structure_tree")
                 .default_size(*dock_tree_width)
@@ -632,44 +956,14 @@ impl EguiApp {
                 .max_size(380.0)
                 .frame(dock_frame(palette))
                 .show(ui, |ui| {
-                    ui.add_space(2.0);
-                    ui.label(
-                        egui::RichText::new("Structure")
-                            .size(14.0)
-                            .strong()
-                            .color(palette.text),
+                    Self::structure_pane_ui(
+                        ui,
+                        document,
+                        gui_state,
+                        tree_widget,
+                        grid_editor,
+                        palette,
                     );
-                    // The tree keeps its own scroll area; bound it so the grid
-                    // and parameter sections below stay reachable at 800 px.
-                    let tree_height = (ui.available_height() * 0.46).max(180.0);
-                    ui.allocate_ui(
-                        egui::vec2(ui.available_width(), tree_height),
-                        |ui| {
-                            if let Some(document) = document.as_mut() {
-                                tree_widget.show(ui, document, gui_state);
-                            }
-                        },
-                    );
-                    ui.separator();
-                    egui::ScrollArea::vertical()
-                        .id_salt("grid_and_parameters")
-                        .show(ui, |ui| {
-                            egui::CollapsingHeader::new("Rectilinear Grid")
-                                .default_open(true)
-                                .show(ui, |ui| {
-                                    if let Some(document) = document.as_mut() {
-                                        let _ = grid_editor.show_mesh(ui, document);
-                                    }
-                                });
-                            ui.separator();
-                            egui::CollapsingHeader::new("Parameter")
-                                .default_open(true)
-                                .show(ui, |ui| {
-                                    if let Some(document) = document.as_mut() {
-                                        let _ = grid_editor.show_parameters(ui, document);
-                                    }
-                                });
-                        });
                 });
             *dock_tree_width = response.response.rect.width();
         }
@@ -680,215 +974,34 @@ impl EguiApp {
                 .min_size(280.0)
                 .frame(dock_frame(palette))
                 .show(ui, |ui| {
-                    ui.add_space(2.0);
-                    ui.label(
-                        egui::RichText::new("Inspector")
-                            .size(14.0)
-                            .strong()
-                            .color(palette.text),
+                    Self::inspector_pane_ui(
+                        ui,
+                        document,
+                        gui_state,
+                        property_editor,
+                        primitive_editor,
+                        transform_editor,
+                        palette,
                     );
-                    ui.separator();
-                    if let Some(document) = document.as_mut() {
-                        egui::ScrollArea::vertical().show(ui, |ui| {
-                            let _ = property_editor.show(ui, document, gui_state);
-                            ui.separator();
-                            let _ = primitive_editor.show(ui, document, gui_state);
-                            ui.separator();
-                            transform_editor.show(ui, document, gui_state);
-                        });
-                    }
                 });
             *dock_inspector_width = response.response.rect.width();
         }
         // The 3D structure is drawn by the wgpu pass underneath egui, so the
-        // central panel must not paint an opaque background over it. It also
-        // carries the picking surface and the axis gizmo.
+        // central panel must not paint an opaque background over it.
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
-                let rect = ui.max_rect();
-                *viewport_rect = rect;
-                let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
-                draw_axis_gizmo(ui, rect, renderer.camera(), palette);
-                let camera = *renderer.camera();
-                let height = rect.height().max(1.0);
-                let aspect = rect.width() / height;
-                // Drag the primitive under the pointer. If nothing is selected
-                // the press picks the primitive first, so a single gesture
-                // selects and moves it.
-                if response.drag_started() {
-                    if let (Some(position), Some(document)) =
-                        (response.interact_pointer_pos(), document.as_ref())
-                    {
-                        if gui_state.selection.primitives.is_empty() {
-                            if let Some(id) = pick_primitive(
-                                renderer.camera(),
-                                document.structure(),
-                                rect,
-                                position,
-                            ) {
-                                trace_input(format!(
-                                    "pick id={} at=({:.0},{:.0})",
-                                    id.get(),
-                                    position.x,
-                                    position.y
-                                ));
-                                let mut selection = Selection::new();
-                                selection.primitives.insert(id);
-                                gui_state.selection = selection.clone();
-                                tree_widget.set_selection(selection);
-                            }
-                        }
-                    }
-                    if !gui_state.selection.primitives.is_empty() {
-                        if let Some(document) = document.as_mut() {
-                            document.begin_gesture();
-                        }
-                        if let Some(id) = gui_state.selection.primitives.iter().copied().next() {
-                            trace_input(format!(
-                                "drag_start id={} mode={:?}",
-                                id.get(),
-                                gui_state.transform_mode
-                            ));
-                        }
-                    }
-                }
-                if response.dragged() {
-                    if let Some(id) = gui_state.selection.primitives.iter().copied().next() {
-                        // Per-frame pointer movement: `drag_delta` is the whole
-                        // gesture and would compound every frame.
-                        let delta = ui.input(|input| input.pointer.delta());
-                        if delta == egui::Vec2::ZERO {
-                            // Nothing moved this frame; skip the model edit.
-                            return;
-                        }
-                        let rotate = ui.input(|input| input.modifiers.alt)
-                            || gui_state.transform_mode == TransformMode::Rotate;
-                        let scale = gui_state.transform_mode == TransformMode::Scale;
-                        let world_per_point = if camera.orthographic {
-                            camera.distance / height
-                        } else {
-                            2.0 * camera.distance * (22.5f32.to_radians()).tan() / height
-                        };
-                        let (sin_yaw, cos_yaw) = camera.yaw.sin_cos();
-                        let right = [-sin_yaw, cos_yaw, 0.0];
-                        let (sin_pitch, cos_pitch) = camera.pitch.sin_cos();
-                        let forward = [-cos_pitch * cos_yaw, -cos_pitch * sin_yaw, -sin_pitch];
-                        let up = [
-                            right[1] * forward[2] - right[2] * forward[1],
-                            right[2] * forward[0] - right[0] * forward[2],
-                            right[0] * forward[1] - right[1] * forward[0],
-                        ];
-                        let world = [
-                            (right[0] * delta.x - up[0] * delta.y) * world_per_point,
-                            (right[1] * delta.x - up[1] * delta.y) * world_per_point,
-                            (right[2] * delta.x - up[2] * delta.y) * world_per_point,
-                        ];
-                        if let Some(document) = document.as_mut() {
-                            if scale {
-                                let factor =
-                                    (1.0 + delta.x as f64 * 0.01).clamp(0.1, 10.0);
-                                let _ = document.scale_primitive_by(id, factor);
-                                trace_input(format!("scale id={} factor={factor:.5}", id.get()));
-                            } else if rotate {
-                                // Alt-drag or the Rotate tool rotates around z.
-                                let angle = delta.x as f64 * 0.01;
-                                let _ = document.rotate_primitive_by(id, [0.0, 0.0, 1.0], angle);
-                                trace_input(format!(
-                                    "rotate id={} angle_rad={angle:.5}",
-                                    id.get()
-                                ));
-                            } else {
-                                let _ = document.move_primitive_by(
-                                    id,
-                                    [world[0] as f64, world[1] as f64, world[2] as f64],
-                                );
-                                trace_input(format!(
-                                    "move id={} dx={:.5e} dy={:.5e} dz={:.5e}",
-                                    id.get(),
-                                    world[0],
-                                    world[1],
-                                    world[2]
-                                ));
-                            }
-                        }
-                    }
-                }
-                let _ = aspect;
-                if response.clicked() {
-                    if let (Some(position), Some(document)) =
-                        (response.interact_pointer_pos(), document.as_ref())
-                    {
-                        if let Some(id) =
-                            pick_primitive(renderer.camera(), document.structure(), rect, position)
-                        {
-                            trace_input(format!("pick id={} at=({:.0},{:.0})", id.get(), position.x, position.y));
-                            let mut selection = Selection::new();
-                            selection.primitives.insert(id);
-                            gui_state.selection = selection.clone();
-                            tree_widget.set_selection(selection);
-                        }
-                    }
-                }
-                // Hover read-out: name the primitive under the cursor, like
-                // the native viewport tooltip, so a click is predictable.
-                if let (Some(position), Some(document)) =
-                    (ui.ctx().pointer_latest_pos(), document.as_ref())
-                {
-                    if rect.contains(position) && !response.dragged() {
-                        if let Some(id) =
-                            pick_primitive(renderer.camera(), document.structure(), rect, position)
-                        {
-                            if let Some(primitive) = document.structure().primitive(id) {
-                                let property = document
-                                    .structure()
-                                    .property_for_primitive(id)
-                                    .map(|property| property.name().to_string())
-                                    .unwrap_or_default();
-                                let label = if property.is_empty() {
-                                    format!("{:?} - ID: {}", primitive.primitive_type(), id.get())
-                                } else {
-                                    format!(
-                                        "{:?} - ID: {}   <   {}",
-                                        primitive.primitive_type(),
-                                        id.get(),
-                                        property
-                                    )
-                                };
-                                let galley = ui.painter().layout_no_wrap(
-                                    label,
-                                    egui::FontId::proportional(12.0),
-                                    palette.text,
-                                );
-                                let anchor = egui::pos2(
-                                    (position.x + 16.0).min(rect.right() - galley.size().x - 16.0),
-                                    (position.y + 18.0).min(rect.bottom() - 30.0),
-                                );
-                                let background = egui::Rect::from_min_size(
-                                    anchor - egui::vec2(7.0, 4.0),
-                                    galley.size() + egui::vec2(14.0, 8.0),
-                                );
-                                ui.painter().rect(
-                                    background,
-                                    egui::CornerRadius::same(theme::RADIUS_INPUT),
-                                    palette.panel_raised,
-                                    egui::Stroke::new(1.0, palette.border_strong),
-                                    egui::StrokeKind::Outside,
-                                );
-                                ui.painter().galley(anchor, galley, palette.text);
-                            }
-                        }
-                    }
-                }
-                // Navigation hint, muted in the lower right corner.
-                ui.painter().text(
-                    rect.right_bottom() - egui::vec2(12.0, 10.0),
-                    egui::Align2::RIGHT_BOTTOM,
-                    "Drag: move   ·   Alt+drag: rotate   ·   MMB drag: orbit   ·   Wheel: zoom",
-                    egui::FontId::proportional(11.5),
-                    palette.text_tertiary,
+                Self::viewport_pane_ui(
+                    ui,
+                    document,
+                    gui_state,
+                    tree_widget,
+                    renderer,
+                    viewport_rect,
+                    palette,
                 );
             });
+        }
 
     }
 
@@ -1072,6 +1185,21 @@ impl EguiApp {
     /// The dock widths last used by the layout.
     pub fn dock_widths(&self) -> (f32, f32) {
         (self.dock_tree_width, self.dock_inspector_width)
+    }
+
+    /// Serialized drag-docking layout for the settings file.
+    #[cfg(feature = "docking")]
+    pub fn dock_layout_json(&self) -> Option<String> {
+        Some(self.dock_layout.to_json())
+    }
+
+    /// Restore a persisted drag-docking layout; corrupt input keeps the
+    /// default so a panel cannot disappear silently.
+    #[cfg(feature = "docking")]
+    pub fn set_dock_layout_json(&mut self, json: &str) {
+        if let Some(layout) = crate::docking::DockLayout::from_json(json) {
+            self.dock_layout = layout;
+        }
     }
 
     /// Apply a theme (used at startup for the persisted preference).
